@@ -20,6 +20,8 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     # SQL safety (used by text_to_sql Lambda)
     "sqlglot>=25.0.0",
+    # Embedded analytics engine for verification queries
+    "duckdb>=1.1.0",
     # CLI / utilities
     "click>=8.1.0",
     "rich>=13.0.0",
@@ -51,6 +53,7 @@ ui = [
 
 [project.scripts]
 acme-generate = "generators.run_all:main"
+acme-verify = "generators.verify:main"
 
 [build-system]
 requires = ["hatchling"]
