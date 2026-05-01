@@ -1,8 +1,8 @@
 """ACME generator orchestrator and CLI entry point.
 
-In Phase 2A this only generates the reference tables (entities, COA, cost
-centers). Subsequent phases (2B-2E) plug in CRM, AR/AP, GL, EPM, and anomaly
-generators behind this same CLI surface.
+Phase 2A: reference data (entities, COA, cost centers).
+Phase 2B: CRM (accounts, contacts, opps, opp_lines, ARR movements, pipeline snapshots).
+Phase 2C-2E: AR/AP/payroll/FA, GL auto-posting, EPM, anomalies.
 
 Usage:
     uv run acme-generate                           # full mode, default seed
@@ -15,12 +15,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
+import numpy as np
+from faker import Faker
 from rich.console import Console
 from rich.table import Table
 
 from . import config as cfg
+from . import crm as crm_module
 from . import entities
-from .output import write_erp_table
+from .output import write_crm_table, write_erp_table
 
 console = Console()
 
@@ -36,6 +39,16 @@ def _parse_years(years_str: str) -> list[int]:
                 f"{sorted(cfg.REVENUE_BY_FY.keys())})"
             )
     return out
+
+
+def _format_money(x: float) -> str:
+    if x >= 1e9:
+        return f"${x/1e9:,.2f}B"
+    if x >= 1e6:
+        return f"${x/1e6:,.1f}M"
+    if x >= 1e3:
+        return f"${x/1e3:,.0f}K"
+    return f"${x:,.0f}"
 
 
 @click.command()
@@ -60,6 +73,11 @@ def main(seed: int, years: str, out_dir: str, quick: bool) -> None:
     fiscal_years = _parse_years(years)
     out_root = Path(out_dir).resolve()
     mode = cfg.MODE_QUICK if quick else cfg.MODE_FULL
+
+    # Single seeded RNG — sub-streams via spawn() for module independence
+    rng = np.random.default_rng(seed)
+    Faker.seed(seed)
+    faker = Faker(["en_US"])
 
     console.rule("[bold cyan]ACME data generator")
     summary = Table(show_header=False, box=None, padding=(0, 2))
@@ -90,21 +108,91 @@ def main(seed: int, years: str, out_dir: str, quick: bool) -> None:
     n_coa = write_erp_table(coa_rows, out_root, "chart_of_accounts")
     n_cc = write_erp_table(cc_rows, out_root, "cost_center")
 
-    counts = Table(title="Reference data written", show_header=True, header_style="bold")
-    counts.add_column("Table")
-    counts.add_column("Rows", justify="right")
-    counts.add_column("Path")
-    counts.add_row("entity",            str(n_entities), str(out_root / "erp" / "entity.csv"))
-    counts.add_row("chart_of_accounts", str(n_coa),      str(out_root / "erp" / "chart_of_accounts.csv"))
-    counts.add_row("cost_center",       str(n_cc),       str(out_root / "erp" / "cost_center.csv"))
-    console.print(counts)
+    counts_a = Table(title="Reference data written", show_header=True, header_style="bold")
+    counts_a.add_column("Table")
+    counts_a.add_column("Rows", justify="right")
+    counts_a.add_column("Path")
+    counts_a.add_row("entity",            str(n_entities), "erp/entity.csv")
+    counts_a.add_row("chart_of_accounts", str(n_coa),      "erp/chart_of_accounts.csv")
+    counts_a.add_row("cost_center",       str(n_cc),       "erp/cost_center.csv")
+    console.print(counts_a)
+    console.print()
 
     # ------------------------------------------------------------------------
-    # Future phases will hook in here
+    # Phase 2B — CRM
+    # ------------------------------------------------------------------------
+    console.rule("[cyan]Phase 2B: CRM")
+
+    crm_rng = np.random.default_rng(rng.integers(0, 2**31))
+    crm = crm_module.generate_crm(crm_rng, faker, mode)
+
+    n_accounts = write_crm_table(crm.accounts, out_root, "account")
+    n_contacts = write_crm_table(crm.contacts, out_root, "contact")
+    n_opps = write_crm_table(
+        crm.opportunities, out_root, "opportunity",
+    )
+    n_opp_lines = write_crm_table(crm.opportunity_lines, out_root, "opportunity_line")
+    n_arr = write_crm_table(
+        crm.arr_movements, out_root, "arr_movement",
+        partition_by="period_yyyymm",
+    )
+    n_snap = write_crm_table(
+        crm.pipeline_snapshots, out_root, "pipeline_snapshot",
+        partition_by="snapshot_date",
+    )
+
+    counts_b = Table(title="CRM data written", show_header=True, header_style="bold")
+    counts_b.add_column("Table")
+    counts_b.add_column("Rows", justify="right")
+    counts_b.add_column("Path")
+    counts_b.add_row("account",            f"{n_accounts:,}",  "crm/account/")
+    counts_b.add_row("contact",            f"{n_contacts:,}",  "crm/contact/")
+    counts_b.add_row("opportunity",        f"{n_opps:,}",      "crm/opportunity/")
+    counts_b.add_row("opportunity_line",   f"{n_opp_lines:,}", "crm/opportunity_line/")
+    counts_b.add_row("arr_movement",       f"{n_arr:,}",       "crm/arr_movement/period_yyyymm=*/")
+    counts_b.add_row("pipeline_snapshot",  f"{n_snap:,}",      "crm/pipeline_snapshot/snapshot_date=*/")
+    console.print(counts_b)
+
+    # CRM tie-out: ARR trajectory vs target
+    console.print()
+    console.print("[bold]ARR trajectory tie-out[/bold]")
+    tie = Table(show_header=True, header_style="bold")
+    tie.add_column("Period")
+    tie.add_column("Generated ARR", justify="right")
+    tie.add_column("Implied annual revenue", justify="right")
+    tie.add_column("Target FY revenue", justify="right")
+    tie.add_column("Δ", justify="right")
+    for fy in fiscal_years:
+        eop_period = cfg.period_yyyymm(cfg.fy_end(fy))
+        gen_arr = crm.arr_by_period.get(eop_period, 0.0)
+        # Implied subscription revenue for that FY = avg ARR over its 12 months × 0.88 (sub share)
+        bop_period = cfg.period_yyyymm(cfg.fy_start(fy))
+        # Average over 12 monthly snapshots
+        periods = []
+        d = cfg.fy_start(fy)
+        while d <= cfg.fy_end(fy):
+            periods.append(cfg.period_yyyymm(d))
+            d += __import__("dateutil.relativedelta", fromlist=["relativedelta"]).relativedelta(months=1)
+        avg_arr = sum(crm.arr_by_period.get(p, 0.0) for p in periods) / max(len(periods), 1)
+        # Target = subscription portion (~88% of total revenue per data dictionary)
+        # Scale target by customer_scale so quick-mode comparisons are sensible.
+        target_total = cfg.REVENUE_BY_FY[fy] * mode.customer_scale
+        target_sub = target_total * 0.88
+        delta_pct = (avg_arr - target_sub) / target_sub * 100 if target_sub else 0.0
+        tie.add_row(
+            f"FY{fy} EOP",
+            _format_money(gen_arr),
+            _format_money(avg_arr),
+            _format_money(target_sub),
+            f"{delta_pct:+.1f}%",
+        )
+    console.print(tie)
+
+    # ------------------------------------------------------------------------
+    # Future phases
     # ------------------------------------------------------------------------
     console.print()
-    console.print("[yellow]Phase 2B-2E not yet implemented.[/yellow] Coming next:")
-    console.print("  • [dim]2B[/dim] CRM accounts, opportunities, ARR movements")
+    console.print("[yellow]Phase 2C-2E not yet implemented.[/yellow] Coming next:")
     console.print("  • [dim]2C[/dim] AR invoices/receipts, AP invoices/payments, payroll, fixed assets")
     console.print("  • [dim]2D[/dim] GL journals (auto-posted) + balance assertions")
     console.print("  • [dim]2E[/dim] EPM budgets/forecasts, seeded anomalies, S3 upload")
