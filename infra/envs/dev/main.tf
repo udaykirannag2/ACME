@@ -1,0 +1,90 @@
+terraform {
+  required_version = ">= 1.9.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.70"
+    }
+  }
+
+  # NOTE: backend block is intentionally not configured yet.
+  # Run scripts/bootstrap-tf-backend.sh once to create the S3 bucket + DynamoDB lock,
+  # then uncomment and `terraform init -migrate-state`.
+  #
+  # backend "s3" {
+  #   bucket         = "acme-finance-tfstate-<account-id>"
+  #   key            = "envs/dev/terraform.tfstate"
+  #   region         = "us-east-1"
+  #   dynamodb_table = "acme-finance-tflock"
+  #   encrypt        = true
+  # }
+}
+
+provider "aws" {
+  region = var.aws_region
+
+  default_tags {
+    tags = {
+      project = "acme-finance"
+      env     = var.env
+      owner   = var.owner
+      managed = "terraform"
+    }
+  }
+}
+
+# =============================================================================
+# Modules — each phase enables the modules it needs.
+# Phase 0: just network + s3-lake + iam-roles.
+# Phase 4 enables: redshift-serverless, glue, rds-erp.
+# Phase 6 enables: bedrock.
+# =============================================================================
+
+module "network" {
+  source   = "../../modules/network"
+  env      = var.env
+  vpc_cidr = "10.42.0.0/16"
+}
+
+module "s3_lake" {
+  source = "../../modules/s3-lake"
+  env    = var.env
+}
+
+module "iam_roles" {
+  source         = "../../modules/iam-roles"
+  env            = var.env
+  s3_lake_arns   = module.s3_lake.bucket_arns
+}
+
+# Enable in Phase 4
+# module "redshift_serverless" {
+#   source       = "../../modules/redshift-serverless"
+#   env          = var.env
+#   subnet_ids   = module.network.private_subnet_ids
+#   security_group_ids = [module.network.redshift_sg_id]
+#   admin_username     = "acme_admin"
+#   base_capacity_rpu  = 8
+#   max_capacity_rpu   = 32
+# }
+
+# module "glue" {
+#   source = "../../modules/glue"
+#   env    = var.env
+#   s3_lake_arns = module.s3_lake.bucket_arns
+# }
+
+# module "rds_erp" {
+#   source             = "../../modules/rds-erp"
+#   env                = var.env
+#   subnet_ids         = module.network.private_subnet_ids
+#   security_group_ids = [module.network.rds_sg_id]
+# }
+
+# Enable in Phase 6
+# module "bedrock" {
+#   source       = "../../modules/bedrock"
+#   env          = var.env
+#   kb_bucket_arn = module.s3_lake.kb_bucket_arn
+# }
