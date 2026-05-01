@@ -21,7 +21,10 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-.terraform.lock.hcl
+# Note: .terraform.lock.hcl IS committed to pin provider versions.
+# tfvars often contain account-specific values; commit only the .example.
+terraform.tfvars
+*.auto.tfvars
 
 # AWS / secrets
 .env

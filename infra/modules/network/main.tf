@@ -101,7 +101,7 @@ data "aws_region" "current" {}
 
 resource "aws_security_group" "rds" {
   name        = "acme-finance-${var.env}-rds-sg"
-  description = "Postgres ERP — internal only"
+  description = "Postgres ERP - internal only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -121,7 +121,7 @@ resource "aws_security_group" "rds" {
 
 resource "aws_security_group" "redshift" {
   name        = "acme-finance-${var.env}-redshift-sg"
-  description = "Redshift Serverless — internal only"
+  description = "Redshift Serverless - internal only"
   vpc_id      = aws_vpc.main.id
 
   ingress {

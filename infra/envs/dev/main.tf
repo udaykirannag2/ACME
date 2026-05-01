@@ -8,17 +8,13 @@ terraform {
     }
   }
 
-  # NOTE: backend block is intentionally not configured yet.
-  # Run scripts/bootstrap-tf-backend.sh once to create the S3 bucket + DynamoDB lock,
-  # then uncomment and `terraform init -migrate-state`.
-  #
-  # backend "s3" {
-  #   bucket         = "acme-finance-tfstate-<account-id>"
-  #   key            = "envs/dev/terraform.tfstate"
-  #   region         = "us-east-1"
-  #   dynamodb_table = "acme-finance-tflock"
-  #   encrypt        = true
-  # }
+  backend "s3" {
+    bucket       = "acme-finance-tfstate-010928194453"
+    key          = "envs/dev/terraform.tfstate"
+    region       = "us-east-1"
+    use_lockfile = true # Terraform 1.10+ native S3 locking (replaces DynamoDB)
+    encrypt      = true
+  }
 }
 
 provider "aws" {
