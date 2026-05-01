@@ -164,8 +164,11 @@ COUNTRY_WEIGHTS_BY_ENTITY: dict[str, dict[str, float]] = {
 # Headcount shape (for cost-center sizing and payroll generation)
 # =============================================================================
 
-# FY25 EOY headcount.
-TOTAL_HEADCOUNT_FY25 = 6_500
+# FY25 EOY headcount. Chosen so that headcount × per-FTE cost reconciles to
+# the opex ratios above (cogs+sm+rd+ga = 90% of revenue), giving ACME a
+# ~$575K revenue/employee productivity figure (slightly higher than CRM's
+# ~$350K because ACME has a leaner cost base in our model).
+TOTAL_HEADCOUNT_FY25 = 4_000
 
 # Function-level headcount distribution (sum to 1.0).
 HEADCOUNT_BY_FUNCTION: dict[str, float] = {
@@ -180,13 +183,15 @@ HEADCOUNT_BY_FUNCTION: dict[str, float] = {
 # Fully-loaded annual cost per FTE by function (USD, FY25).
 # Includes salary, benefits (1.25x), payroll taxes, and stock-based comp at
 # fully diluted run-rate (~15% of cash comp).
+# Calibrated so that Σ(HC_function × cost_function) ≈ target opex ratios
+# (cogs + sm + rd + ga = 90% × revenue) at TOTAL_HEADCOUNT_FY25 = 4,000.
 ANNUAL_FTE_COST_BY_FUNCTION: dict[str, float] = {
-    "sales":             280_000,
-    "marketing":         210_000,
-    "rd":                340_000,
-    "customer_success":  175_000,
-    "ga":                250_000,
-    "it":                240_000,
+    "sales":             310_000,
+    "marketing":         230_000,
+    "rd":                240_000,
+    "customer_success":  185_000,
+    "ga":                190_000,
+    "it":                210_000,
 }
 
 # Each function maintains presence in each entity at these weights.

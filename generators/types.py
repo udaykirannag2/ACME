@@ -305,3 +305,31 @@ class ARRMovementRow:
     arr_change: float
     starting_arr: float
     ending_arr: float
+
+
+# =============================================================================
+# Phase 2C/2D plumbing — "pending journals" emitted by 2C modules and consumed
+# by the GL auto-poster in 2D. These are NOT written to disk directly; they
+# become GLJournalHeaderRow + GLJournalLineRow in 2D.
+# =============================================================================
+
+@dataclass(slots=True)
+class PendingJournalLineSpec:
+    account_id: str
+    cost_center_id: str | None
+    debit_amount: float
+    credit_amount: float
+    memo: str
+    reference_doc_type: str | None = None
+    reference_doc_id: str | None = None
+
+
+@dataclass(slots=True)
+class PendingJournalSpec:
+    posting_date: date
+    period_yyyymm: int
+    entity_id: str
+    journal_type: str        # manual|auto_revrec|auto_dep|auto_ar|auto_ap|intercompany
+    description: str
+    created_by: str
+    lines: list[PendingJournalLineSpec]
