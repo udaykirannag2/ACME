@@ -210,7 +210,7 @@ class PlanLineRow:
     version_id: str
     version_type: str
     account_id: str
-    cost_center_id: str
+    cost_center_id: str | None    # NULL for revenue plan lines (revenue isn't cost-center-attributed)
     entity_id: str
     period_yyyymm: int
     amount: float
