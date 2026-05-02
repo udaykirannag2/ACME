@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS entity (
 );
 
 CREATE TABLE IF NOT EXISTS chart_of_accounts (
-    account_id      varchar(16)   PRIMARY KEY,
+    account_id      varchar(32)   PRIMARY KEY,
     account_number  varchar(8)    NOT NULL,
     account_name    varchar(128)  NOT NULL,
     account_type    varchar(16)   NOT NULL CHECK (account_type IN ('asset','liability','equity','revenue','expense')),
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS chart_of_accounts (
 CREATE INDEX IF NOT EXISTS idx_coa_pnl_rollup ON chart_of_accounts (pnl_rollup);
 
 CREATE TABLE IF NOT EXISTS cost_center (
-    cost_center_id    varchar(16)   PRIMARY KEY,
+    cost_center_id    varchar(32)   PRIMARY KEY,
     cost_center_name  varchar(128)  NOT NULL,
     function          varchar(32)   NOT NULL,
     entity_id         varchar(8)    NOT NULL REFERENCES entity(entity_id)
@@ -58,7 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_customer_country ON customer (billing_country);
 
 CREATE TABLE IF NOT EXISTS gl_journal_header (
     journal_id      varchar(36)   PRIMARY KEY,
-    journal_number  varchar(16)   NOT NULL UNIQUE,
+    journal_number  varchar(24)   NOT NULL UNIQUE,
     posting_date    date          NOT NULL,
     period_yyyymm   integer       NOT NULL,
     entity_id       varchar(8)    NOT NULL REFERENCES entity(entity_id),
@@ -74,12 +74,12 @@ CREATE TABLE IF NOT EXISTS gl_journal_line (
     journal_line_id      varchar(36)    PRIMARY KEY,
     journal_id           varchar(36)    NOT NULL REFERENCES gl_journal_header(journal_id) ON DELETE CASCADE,
     line_number          integer        NOT NULL,
-    account_id           varchar(16)    NOT NULL REFERENCES chart_of_accounts(account_id),
-    cost_center_id       varchar(16)    REFERENCES cost_center(cost_center_id),
+    account_id           varchar(32)    NOT NULL REFERENCES chart_of_accounts(account_id),
+    cost_center_id       varchar(32)    REFERENCES cost_center(cost_center_id),
     debit_amount         numeric(18,2)  NOT NULL DEFAULT 0,
     credit_amount        numeric(18,2)  NOT NULL DEFAULT 0,
     memo                 text,
-    reference_doc_type   varchar(16),
+    reference_doc_type   varchar(32),
     reference_doc_id     varchar(36),
     CONSTRAINT chk_jl_one_side CHECK (
         (debit_amount > 0 AND credit_amount = 0) OR
@@ -102,8 +102,8 @@ CREATE TABLE IF NOT EXISTS ap_invoice (
     invoice_date      date           NOT NULL,
     due_date          date           NOT NULL,
     amount            numeric(18,2)  NOT NULL CHECK (amount > 0),
-    account_id        varchar(16)    NOT NULL REFERENCES chart_of_accounts(account_id),
-    cost_center_id    varchar(16)    NOT NULL REFERENCES cost_center(cost_center_id),
+    account_id        varchar(32)    NOT NULL REFERENCES chart_of_accounts(account_id),
+    cost_center_id    varchar(32)    NOT NULL REFERENCES cost_center(cost_center_id),
     status            varchar(16)    NOT NULL DEFAULT 'open' CHECK (status IN ('open','partial','paid','voided')),
     created_at        timestamptz    NOT NULL DEFAULT now(),
     UNIQUE (vendor_id, invoice_number)
@@ -164,7 +164,7 @@ CREATE TABLE IF NOT EXISTS fixed_asset (
     salvage_value         numeric(18,2)  NOT NULL DEFAULT 0,
     depreciation_method   varchar(16)    NOT NULL DEFAULT 'straight_line',
     entity_id             varchar(8)     NOT NULL REFERENCES entity(entity_id),
-    cost_center_id        varchar(16)    NOT NULL REFERENCES cost_center(cost_center_id),
+    cost_center_id        varchar(32)    NOT NULL REFERENCES cost_center(cost_center_id),
     disposal_date         date,
     disposal_proceeds     numeric(18,2),
     status                varchar(16)    NOT NULL DEFAULT 'active' CHECK (status IN ('active','disposed','fully_depreciated'))

@@ -32,10 +32,16 @@ Target: **~$50/month** for an actively-used dev environment. Up to ~$100 in "bui
 ## Tear-down checklist (between sessions)
 
 ```bash
-# Stop RDS ERP
-aws rds stop-db-instance --db-instance-identifier acme-erp-dev
+# Phase 3: stop RDS ERP — saves ~70% (computes paused, storage still incurs ~$2.30/mo)
+AWS_PROFILE=acme-admin ./scripts/stop-rds.sh
 
-# Pause Redshift Serverless (auto-pauses, but explicit is fine)
+# To resume:
+AWS_PROFILE=acme-admin ./scripts/start-rds.sh   # ~3-5 min for instance to become available
+
+# If your home IP changed (Comcast renewal, hotel WiFi, etc.):
+AWS_PROFILE=acme-admin ./scripts/refresh-my-ip.sh   # ~30 sec, idempotent
+
+# Phase 4+: Pause Redshift Serverless (auto-pauses, but explicit is fine)
 # nothing to do — auto-pause handles it
 
 # Stop SageMaker notebook
@@ -44,6 +50,8 @@ aws sagemaker stop-notebook-instance --notebook-instance-name acme-finance-dev
 # Stop DMS task (only after full load complete)
 aws dms stop-replication-task --replication-task-arn ...
 ```
+
+**Important**: RDS auto-restarts after 7 days of being stopped (AWS limit). If you'll be away longer, consider `terraform destroy` instead — your generators are deterministic so you can rebuild from scratch in ~20 minutes.
 
 ## Tear-down checklist (end of project / extended hiatus)
 

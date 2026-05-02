@@ -21,3 +21,9 @@ variable "budget_alert_email" {
   type        = string
   # Set in terraform.tfvars (gitignored) or via TF_VAR_budget_alert_email.
 }
+
+variable "my_ip_cidr" {
+  description = "Operator's public IPv4 in CIDR /32. Used to allowlist RDS access. Null disables public ingress."
+  type        = string
+  default     = null
+}

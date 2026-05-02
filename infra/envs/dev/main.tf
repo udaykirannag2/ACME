@@ -71,12 +71,17 @@ module "iam_roles" {
 #   s3_lake_arns = module.s3_lake.bucket_arns
 # }
 
-# module "rds_erp" {
-#   source             = "../../modules/rds-erp"
-#   env                = var.env
-#   subnet_ids         = module.network.private_subnet_ids
-#   security_group_ids = [module.network.rds_sg_id]
-# }
+# Phase 3 — RDS Postgres ERP simulator
+module "rds_erp" {
+  source             = "../../modules/rds-erp"
+  env                = var.env
+  # Public subnets so the operator's IP allowlist works. RDS picks one of these
+  # for the actual instance based on AZ availability.
+  subnet_ids         = module.network.public_subnet_ids
+  security_group_ids = [module.network.rds_sg_id]
+  kms_key_arn        = module.s3_lake.kms_key_arn
+  my_ip_cidr         = var.my_ip_cidr
+}
 
 # Enable in Phase 6
 # module "bedrock" {

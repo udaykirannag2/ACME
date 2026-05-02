@@ -4,3 +4,4 @@ aws_region          = "us-east-1"
 env                 = "dev"
 owner               = "uday"
 budget_alert_email  = "udaykirannag@gmail.com"
+my_ip_cidr          = "98.45.152.91/32"  # Phase 3: your public IPv4 for RDS allowlist
