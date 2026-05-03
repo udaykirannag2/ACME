@@ -33,6 +33,9 @@ resource "aws_glue_catalog_database" "raw_crm" {
 resource "aws_glue_catalog_database" "curated" {
   name        = "acme_finance_curated_${var.env}"
   description = "Curated zone — Iceberg tables produced by Phase 4D Glue ETL jobs"
+  # Location_uri is what Iceberg uses to derive each table's data file location
+  # when a table is created without an explicit `location` property.
+  location_uri = "s3://${var.curated_bucket_name}/iceberg/"
 }
 
 # =============================================================================
@@ -106,5 +109,74 @@ resource "aws_glue_crawler" "crm" {
   schema_change_policy {
     update_behavior = "UPDATE_IN_DATABASE"
     delete_behavior = "LOG"
+  }
+}
+
+# Crawler over the curated zone so the freshly written Iceberg tables show up
+# in Spectrum after each ETL run. Iceberg tables are auto-detected by Glue
+# crawlers via the metadata.json marker file.
+resource "aws_glue_crawler" "curated" {
+  name          = "acme-finance-${var.env}-crawler-curated"
+  database_name = aws_glue_catalog_database.curated.name
+  role          = var.glue_role_arn
+  description   = "Crawls curated Iceberg tables under s3://...curated/iceberg/"
+
+  s3_target {
+    path = "s3://${var.curated_bucket_name}/iceberg/"
+  }
+
+  configuration = local.crawler_configuration
+
+  schema_change_policy {
+    update_behavior = "UPDATE_IN_DATABASE"
+    delete_behavior = "LOG"
+  }
+}
+
+# =============================================================================
+# ETL job — reads Glue Catalog raw, writes Iceberg into curated
+# =============================================================================
+
+resource "aws_s3_object" "etl_script" {
+  bucket = var.curated_bucket_name
+  key    = "_glue_scripts/raw_to_curated.py"
+  source = "${path.root}/../../../pipelines/glue_jobs/raw_to_curated.py"
+  etag   = filemd5("${path.root}/../../../pipelines/glue_jobs/raw_to_curated.py")
+}
+
+resource "aws_glue_job" "raw_to_curated" {
+  name              = "acme-finance-${var.env}-raw-to-curated"
+  role_arn          = var.glue_role_arn
+  glue_version      = "4.0"
+  worker_type       = "G.1X"
+  number_of_workers = 2
+  execution_class   = "STANDARD"
+  timeout           = 30 # minutes
+  max_retries       = 0
+
+  # Allow the 3 parallel ETL invocations from Step Functions (one per source db).
+  # Set to 5 with headroom because Glue's API can briefly count a STOPPING job
+  # as "active" against the limit.
+  execution_property {
+    max_concurrent_runs = 5
+  }
+
+  command {
+    name            = "glueetl"
+    script_location = "s3://${var.curated_bucket_name}/${aws_s3_object.etl_script.key}"
+    python_version  = "3"
+  }
+
+  default_arguments = {
+    "--datalake-formats"                 = "iceberg"
+    "--enable-glue-datacatalog"          = "true"
+    "--enable-metrics"                   = "true"
+    "--enable-continuous-cloudwatch-log" = "true"
+    "--target_database"                  = aws_glue_catalog_database.curated.name
+    "--target_warehouse_path"            = "s3://${var.curated_bucket_name}/iceberg/"
+    # Explicit Iceberg + Glue catalog config (Glue 4.0 auto-config doesn't always
+    # set the warehouse path correctly).
+    "--conf"                             = "spark.sql.catalog.glue_iceberg=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_iceberg.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_iceberg.warehouse=s3://${var.curated_bucket_name}/iceberg/ --conf spark.sql.catalog.glue_iceberg.io-impl=org.apache.iceberg.aws.s3.S3FileIO"
+    # --source_database is supplied at run time
   }
 }

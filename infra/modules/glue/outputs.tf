@@ -30,3 +30,19 @@ output "crawler_names" {
     aws_glue_crawler.crm.name,
   ]
 }
+
+output "curated_crawler_name" {
+  value = aws_glue_crawler.curated.name
+}
+
+output "etl_job_name" {
+  value = aws_glue_job.raw_to_curated.name
+}
+
+output "all_raw_database_names" {
+  value = [
+    aws_glue_catalog_database.raw_erp.name,
+    aws_glue_catalog_database.raw_epm.name,
+    aws_glue_catalog_database.raw_crm.name,
+  ]
+}

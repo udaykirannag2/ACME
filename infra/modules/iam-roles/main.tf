@@ -23,7 +23,7 @@ resource "aws_iam_role_policy_attachment" "glue_service" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
 }
 
-# Allow Glue to read/write the lake buckets
+# Allow Glue to read/write the lake buckets + decrypt KMS-encrypted objects
 data "aws_iam_policy_document" "glue_lake_access" {
   statement {
     effect  = "Allow"
@@ -32,6 +32,12 @@ data "aws_iam_policy_document" "glue_lake_access" {
       [for arn in values(var.s3_lake_arns) : arn],
       [for arn in values(var.s3_lake_arns) : "${arn}/*"],
     )
+  }
+
+  statement {
+    effect  = "Allow"
+    actions = ["kms:Decrypt", "kms:DescribeKey", "kms:GenerateDataKey", "kms:Encrypt", "kms:ReEncrypt*"]
+    resources = [var.kms_key_arn]
   }
 }
 

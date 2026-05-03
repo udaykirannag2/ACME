@@ -170,6 +170,13 @@ resource "aws_redshiftserverless_workgroup" "main" {
   tags = {
     Name = "acme-finance-${var.env}-workgroup"
   }
+
+  # AWS provider quirk: Terraform thinks config_parameter is "changed" on every
+  # apply even when it isn't, then UpdateWorkgroup rejects with "no changes".
+  # Ignoring drift on config_parameter avoids the spurious error.
+  lifecycle {
+    ignore_changes = [config_parameter]
+  }
 }
 
 # =============================================================================

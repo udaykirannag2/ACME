@@ -52,14 +52,41 @@ module "iam_roles" {
   source         = "../../modules/iam-roles"
   env            = var.env
   s3_lake_arns   = module.s3_lake.bucket_arns
+  kms_key_arn    = module.s3_lake.kms_key_arn
 }
 
-# Phase 4A — Glue Catalog + crawlers
+# Phase 4A — Glue Catalog + crawlers + Phase 4D ETL job
 module "glue" {
-  source          = "../../modules/glue"
-  env             = var.env
-  raw_bucket_name = module.s3_lake.bucket_names["raw"]
-  glue_role_arn   = module.iam_roles.glue_role_arn
+  source              = "../../modules/glue"
+  env                 = var.env
+  raw_bucket_name     = module.s3_lake.bucket_names["raw"]
+  curated_bucket_name = module.s3_lake.bucket_names["curated"]
+  glue_role_arn       = module.iam_roles.glue_role_arn
+}
+
+# Phase 4F — Step Functions daily refresh + EventBridge schedule
+module "step_functions" {
+  source               = "../../modules/step-functions"
+  env                  = var.env
+  etl_job_name         = module.glue.etl_job_name
+  raw_erp_database     = module.glue.raw_erp_database_name
+  raw_epm_database     = module.glue.raw_epm_database_name
+  raw_crm_database     = module.glue.raw_crm_database_name
+  curated_crawler_name = module.glue.curated_crawler_name
+  schedule_enabled     = false # leave disabled until you've verified manually
+}
+
+# Phase 4E — DMS Serverless replication: RDS -> S3 raw zone
+module "dms" {
+  source             = "../../modules/dms"
+  env                = var.env
+  subnet_ids         = module.network.private_subnet_ids
+  security_group_ids = [module.network.rds_sg_id]
+  raw_bucket_name    = module.s3_lake.bucket_names["raw"]
+  raw_bucket_arn     = module.s3_lake.bucket_arns["raw"]
+  kms_key_arn        = module.s3_lake.kms_key_arn
+  source_secret_arn  = module.rds_erp.secret_arn
+  source_database_name = "acme_erp"
 }
 
 # Phase 4B — Redshift Serverless

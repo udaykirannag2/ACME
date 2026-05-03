@@ -35,7 +35,39 @@ output "glue_databases" {
 
 output "glue_crawlers" {
   value       = module.glue.crawler_names
-  description = "Crawler names for `aws glue start-crawler`."
+  description = "Raw zone crawler names for `aws glue start-crawler`."
+}
+
+output "glue_curated_crawler" {
+  value       = module.glue.curated_crawler_name
+  description = "Curated zone crawler (Iceberg). Run after ETL job."
+}
+
+output "glue_etl_job" {
+  value       = module.glue.etl_job_name
+  description = "Glue ETL job name (raw -> curated Iceberg)."
+}
+
+# DMS outputs
+output "dms_replication_config_arn" {
+  value       = module.dms.replication_config_arn
+  description = "DMS Serverless replication config ARN."
+}
+
+output "dms_replication_config_id" {
+  value       = module.dms.replication_config_id
+  description = "DMS replication config identifier (use with start-replication)."
+}
+
+# Step Functions outputs
+output "sfn_state_machine_arn" {
+  value       = module.step_functions.state_machine_arn
+  description = "ARN of the daily refresh state machine."
+}
+
+output "sfn_schedule_rule" {
+  value       = module.step_functions.schedule_rule_name
+  description = "EventBridge rule name for the daily refresh."
 }
 
 output "redshift_workgroup" {
