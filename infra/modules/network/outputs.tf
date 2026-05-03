@@ -7,8 +7,13 @@ output "public_subnet_id" {
 }
 
 output "public_subnet_ids" {
-  description = "Both public subnets (used by RDS subnet group which requires 2+ AZs)."
+  description = "Public subnets a+b (used by RDS subnet group which requires 2+ AZs)."
   value       = [aws_subnet.public.id, aws_subnet.public_b.id]
+}
+
+output "public_subnet_ids_3az" {
+  description = "All three public subnets (Redshift Serverless requires 3+ AZs)."
+  value       = [aws_subnet.public.id, aws_subnet.public_b.id, aws_subnet.public_c.id]
 }
 
 output "private_subnet_ids" {

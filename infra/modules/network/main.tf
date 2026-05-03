@@ -71,6 +71,23 @@ resource "aws_route_table_association" "public_b" {
   route_table_id = aws_route_table.public.id
 }
 
+# Third public subnet — Redshift Serverless requires 3 subnets in 3 AZs
+resource "aws_subnet" "public_c" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 2)
+  availability_zone       = data.aws_availability_zones.available.names[2]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "acme-finance-${var.env}-public-c"
+  }
+}
+
+resource "aws_route_table_association" "public_c" {
+  subnet_id      = aws_subnet.public_c.id
+  route_table_id = aws_route_table.public.id
+}
+
 # --- Private subnets (2 AZs for RDS subnet group requirement) ----------------
 
 resource "aws_subnet" "private" {
@@ -116,24 +133,37 @@ data "aws_region" "current" {}
 
 # --- Security groups (created here, used by RDS/Redshift modules) -----------
 
+# SGs use standalone aws_security_group_rule resources so module-added rules
+# (operator IP allowlists from rds-erp and redshift-serverless modules) don't
+# fight with inline ingress declarations.
 resource "aws_security_group" "rds" {
   name        = "acme-finance-${var.env}-rds-sg"
   description = "Postgres ERP - internal only"
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+  lifecycle {
+    create_before_destroy = true
   }
+}
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+resource "aws_security_group_rule" "rds_ingress_vpc" {
+  type              = "ingress"
+  from_port         = 5432
+  to_port           = 5432
+  protocol          = "tcp"
+  cidr_blocks       = [var.vpc_cidr]
+  security_group_id = aws_security_group.rds.id
+  description       = "Postgres from within VPC"
+}
+
+resource "aws_security_group_rule" "rds_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.rds.id
+  description       = "All egress"
 }
 
 resource "aws_security_group" "redshift" {
@@ -141,17 +171,27 @@ resource "aws_security_group" "redshift" {
   description = "Redshift Serverless - internal only"
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    from_port   = 5439
-    to_port     = 5439
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+  lifecycle {
+    create_before_destroy = true
   }
+}
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+resource "aws_security_group_rule" "redshift_ingress_vpc" {
+  type              = "ingress"
+  from_port         = 5439
+  to_port           = 5439
+  protocol          = "tcp"
+  cidr_blocks       = [var.vpc_cidr]
+  security_group_id = aws_security_group.redshift.id
+  description       = "Redshift from within VPC"
+}
+
+resource "aws_security_group_rule" "redshift_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.redshift.id
+  description       = "All egress"
 }

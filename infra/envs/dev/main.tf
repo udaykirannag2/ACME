@@ -54,22 +54,25 @@ module "iam_roles" {
   s3_lake_arns   = module.s3_lake.bucket_arns
 }
 
-# Enable in Phase 4
-# module "redshift_serverless" {
-#   source       = "../../modules/redshift-serverless"
-#   env          = var.env
-#   subnet_ids   = module.network.private_subnet_ids
-#   security_group_ids = [module.network.redshift_sg_id]
-#   admin_username     = "acme_admin"
-#   base_capacity_rpu  = 8
-#   max_capacity_rpu   = 32
-# }
+# Phase 4A — Glue Catalog + crawlers
+module "glue" {
+  source          = "../../modules/glue"
+  env             = var.env
+  raw_bucket_name = module.s3_lake.bucket_names["raw"]
+  glue_role_arn   = module.iam_roles.glue_role_arn
+}
 
-# module "glue" {
-#   source = "../../modules/glue"
-#   env    = var.env
-#   s3_lake_arns = module.s3_lake.bucket_arns
-# }
+# Phase 4B — Redshift Serverless
+module "redshift_serverless" {
+  source             = "../../modules/redshift-serverless"
+  env                = var.env
+  subnet_ids         = module.network.public_subnet_ids_3az
+  security_group_ids = [module.network.redshift_sg_id]
+  kms_key_arn        = module.s3_lake.kms_key_arn
+  s3_lake_arns       = module.s3_lake.bucket_arns
+  my_ip_cidr         = var.my_ip_cidr
+  publicly_accessible = true
+}
 
 # Phase 3 — RDS Postgres ERP simulator
 module "rds_erp" {
