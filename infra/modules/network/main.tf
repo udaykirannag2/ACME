@@ -129,6 +129,38 @@ resource "aws_vpc_endpoint" "s3" {
   }
 }
 
+# Interface endpoint for Secrets Manager so DMS Serverless (in private subnets)
+# can fetch the RDS master credentials secret without internet egress.
+# ~$7/mo per AZ for the endpoint ENIs.
+resource "aws_security_group" "vpc_endpoints" {
+  name        = "acme-finance-${var.env}-vpc-endpoints-sg"
+  description = "Allow HTTPS from VPC to interface VPC endpoints"
+  vpc_id      = aws_vpc.main.id
+}
+
+resource "aws_security_group_rule" "vpc_endpoints_ingress" {
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = [var.vpc_cidr]
+  security_group_id = aws_security_group.vpc_endpoints.id
+  description       = "HTTPS from VPC for AWS API calls"
+}
+
+resource "aws_vpc_endpoint" "secretsmanager" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.secretsmanager"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "acme-finance-${var.env}-secretsmanager-endpoint"
+  }
+}
+
 data "aws_region" "current" {}
 
 # --- Security groups (created here, used by RDS/Redshift modules) -----------
