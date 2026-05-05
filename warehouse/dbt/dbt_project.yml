@@ -1,0 +1,42 @@
+name: acme_finance
+version: "1.0.0"
+config-version: 2
+
+profile: acme_finance
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  acme_finance:
+    staging:
+      +materialized: view
+      +schema: staging
+      erp:
+        +tags: ["erp", "staging"]
+      crm:
+        +tags: ["crm", "staging"]
+      epm:
+        +tags: ["epm", "staging"]
+    intermediate:
+      +materialized: table
+      +schema: intermediate
+      +tags: ["intermediate"]
+    marts:
+      +materialized: table
+      finance:
+        +schema: marts
+        +tags: ["finance", "mart"]
+      sales:
+        +schema: marts
+        +tags: ["sales", "mart"]
+
+vars:
+  fiscal_year_end_month: 1         # January 31
+  start_date: "2023-02-01"         # FY23 start (Feb 1, 2022 = FY22 start)
+  entities: ["US", "EMEA", "APAC"]

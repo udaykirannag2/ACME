@@ -1,0 +1,59 @@
+version: 2
+
+sources:
+  - name: curated_erp
+    description: "Curated ERP data — Iceberg tables via Redshift Spectrum (Glue Catalog)"
+    schema: acme_finance_curated_dev      # Spectrum external schema
+    database: dev
+    freshness:
+      warn_after: {count: 25, period: hour}
+      error_after: {count: 49, period: hour}
+    loaded_at_field: _ingest_date
+
+    tables:
+      - name: entity
+        description: "Legal entities: US, EMEA, APAC"
+      - name: chart_of_accounts
+        description: "GL account master (~140 accounts)"
+        columns:
+          - name: account_type
+            tests:
+              - accepted_values:
+                  values: ["asset", "liability", "equity", "revenue", "expense"]
+      - name: cost_center
+        description: "~25 cost centers across entities and functions"
+      - name: vendor
+        description: "Vendor master"
+      - name: customer
+        description: "Customer master (~8K active)"
+      - name: gl_journal_header
+        description: "Journal entry headers — one per journal"
+        columns:
+          - name: journal_id
+            tests: [unique, not_null]
+      - name: gl_journal_line
+        description: "Journal entry lines — one per GL account posting"
+        columns:
+          - name: journal_line_id
+            tests: [unique, not_null]
+      - name: ap_invoice
+        description: "Accounts payable invoices"
+        columns:
+          - name: ap_invoice_id
+            tests: [unique, not_null]
+      - name: ap_payment
+        description: "AP payments against invoices"
+      - name: ar_invoice
+        description: "Accounts receivable invoices (revenue)"
+        columns:
+          - name: ar_invoice_id
+            tests: [unique, not_null]
+      - name: ar_receipt
+        description: "AR cash receipts"
+      - name: fixed_asset
+        description: "Fixed assets register"
+        columns:
+          - name: fixed_asset_id
+            tests: [unique, not_null]
+      - name: fa_depreciation
+        description: "Monthly depreciation schedule per asset"

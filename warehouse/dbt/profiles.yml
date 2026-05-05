@@ -1,0 +1,14 @@
+acme_finance:
+  target: dev
+  outputs:
+    dev:
+      type: redshift
+      host: acme-finance-dev.010928194453.us-east-1.redshift-serverless.amazonaws.com
+      port: 5439
+      dbname: dev
+      user: acme_admin
+      password: "{{ env_var('REDSHIFT_PASSWORD') }}"
+      schema: analytics_dev
+      threads: 4
+      connect_timeout: 30
+      ra3_node: true

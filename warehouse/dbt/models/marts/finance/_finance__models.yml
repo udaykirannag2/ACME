@@ -1,0 +1,71 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: "Calendar and fiscal date spine (FY23–FY25, daily grain)"
+    columns:
+      - name: date_day
+        tests: [unique, not_null]
+
+  - name: dim_account
+    description: "GL chart of accounts dimension"
+    columns:
+      - name: account_id
+        tests: [unique, not_null]
+      - name: account_type
+        tests:
+          - accepted_values:
+              values: ["asset", "liability", "equity", "revenue", "expense"]
+
+  - name: dim_entity
+    description: "Legal entities: US, EMEA, APAC"
+    columns:
+      - name: entity_id
+        tests: [unique, not_null]
+
+  - name: dim_cost_center
+    description: "Cost centers with entity rollup"
+    columns:
+      - name: cost_center_id
+        tests: [unique, not_null]
+
+  - name: dim_customer
+    description: "Customer dimension with region"
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+
+  - name: fct_gl_entries
+    description: "Atomic GL journal lines — source of truth for all P&L and balance sheet"
+    columns:
+      - name: journal_line_id
+        tests: [unique, not_null]
+      - name: posting_date
+        tests: [not_null]
+      - name: entity_id
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["US", "EMEA", "APAC"]
+      - name: debit_amount
+        tests: [not_null]
+      - name: credit_amount
+        tests: [not_null]
+
+  - name: fct_revenue
+    description: "Monthly revenue by entity and segment"
+    columns:
+      - name: revenue_amount
+        tests: [not_null]
+
+  - name: fct_expense
+    description: "Monthly expenses by entity, cost center, and category"
+    columns:
+      - name: expense_amount
+        tests: [not_null]
+
+  - name: mart_pl
+    description: "P&L summary: revenue, COGS, gross profit, OpEx, operating income"
+
+  - name: mart_ar_aging
+    description: "AR aging buckets for open invoices"
