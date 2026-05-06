@@ -15,7 +15,7 @@ clean-targets: ["target", "dbt_packages"]
 models:
   acme_finance:
     staging:
-      +materialized: view
+      +materialized: table
       +schema: staging
       erp:
         +tags: ["erp", "staging"]

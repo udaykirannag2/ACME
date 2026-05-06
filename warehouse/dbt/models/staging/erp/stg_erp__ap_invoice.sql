@@ -13,9 +13,9 @@ select
     cost_center_id,
     status,
 
-    datediff('day', invoice_date, current_date)             as days_since_invoice,
-    datediff('day', due_date, current_date)                 as days_overdue,
-    case when status = 'open' and current_date > due_date
+    datediff('day', invoice_date::date, current_date)       as days_since_invoice,
+    datediff('day', due_date::date, current_date)           as days_overdue,
+    case when status = 'open' and current_date > due_date::date
          then true else false end                           as is_overdue,
 
     _ingest_date,

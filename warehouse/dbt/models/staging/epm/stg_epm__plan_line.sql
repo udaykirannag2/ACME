@@ -1,23 +1,25 @@
 with source as (
     select * from {{ source('curated_epm', 'plan_line') }}
-),
-
-budget_versions as (
-    select * from {{ source('curated_epm', 'budget_version') }}
 )
 
 select
-    pl.plan_line_id,
-    pl.budget_version_id,
-    bv.version_name,
-    bv.version_type,
-    bv.fiscal_year,
-    pl.period_yyyymm,
-    pl.account_id,
-    pl.cost_center_id,
-    pl.entity_id,
-    pl.amount,
-    pl._ingest_date
+    plan_line_id,
+    version_id,
+    version_type,
+    account_id,
+    cost_center_id,
+    entity_id,
+    amount,
+    segment,
+    period_yyyymm,
+    _ingest_date,
+    _ingest_run_id,
 
-from source pl
-inner join budget_versions bv on pl.budget_version_id = bv.budget_version_id
+    -- fiscal_year from period_yyyymm string (format YYYYMM)
+    case
+        when cast(right(period_yyyymm, 2) as integer) >= 2
+        then cast(left(period_yyyymm, 4) as integer)
+        else cast(left(period_yyyymm, 4) as integer) - 1
+    end                                                     as fiscal_year
+
+from source

@@ -15,17 +15,17 @@ select
     status,
     opportunity_id,
 
-    -- days outstanding
-    datediff('day', invoice_date, current_date)             as days_since_invoice,
-    datediff('day', due_date, current_date)                 as days_overdue,
-    case when status = 'open' and current_date > due_date
+    -- days outstanding (cast from string to date for Spectrum compat)
+    datediff('day', invoice_date::date, current_date)       as days_since_invoice,
+    datediff('day', due_date::date, current_date)           as days_overdue,
+    case when status = 'open' and current_date > due_date::date
          then true else false end                           as is_overdue,
 
     -- fiscal year from invoice date
     case
-        when extract(month from invoice_date) >= 2
-        then extract(year from invoice_date)
-        else extract(year from invoice_date) - 1
+        when extract(month from invoice_date::date) >= 2
+        then extract(year from invoice_date::date)
+        else extract(year from invoice_date::date) - 1
     end                                                     as fiscal_year,
 
     _ingest_date,

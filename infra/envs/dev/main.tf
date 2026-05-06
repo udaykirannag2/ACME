@@ -113,9 +113,11 @@ module "rds_erp" {
   my_ip_cidr         = var.my_ip_cidr
 }
 
-# Enable in Phase 6
-# module "bedrock" {
-#   source       = "../../modules/bedrock"
-#   env          = var.env
-#   kb_bucket_arn = module.s3_lake.kb_bucket_arn
-# }
+# Phase 6 — Bedrock Agent (NLP-to-SQL finance analyst)
+module "bedrock" {
+  source                 = "../../modules/bedrock"
+  env                    = var.env
+  kb_bucket_arn          = module.s3_lake.kb_bucket_arn
+  redshift_workgroup_arn = module.redshift_serverless.workgroup_arn
+  lambda_source_dir      = "${path.root}/../../../agent/lambdas/text_to_sql"
+}
