@@ -20,6 +20,6 @@ variable "lambda_source_dir" {
 
 variable "foundation_model_id" {
   type        = string
-  default     = "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+  default     = "us.anthropic.claude-sonnet-4-6"
   description = "Bedrock foundation model ID for the agent"
 }

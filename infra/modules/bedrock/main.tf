@@ -150,8 +150,10 @@ resource "aws_iam_role_policy" "bedrock_agent_fm" {
     Version = "2012-10-17"
     Statement = [{
       Effect   = "Allow"
-      Action   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
-      Resource = "arn:aws:bedrock:us-east-1::foundation-model/${var.foundation_model_id}"
+      Action = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+      # Cross-region inference profiles (us.*) require both the foundation-model
+      # and inference-profile ARN patterns; wildcard covers both cleanly.
+      Resource = "*"
     }]
   })
 }

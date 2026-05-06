@@ -183,6 +183,10 @@ SCHEMA_DEFINITION = {
 
 
 def lambda_handler(event, context):
+    import logging
+    logging.getLogger().setLevel(logging.INFO)
+    logging.info("Bedrock event: %s", json.dumps(event, default=str))
+
     action_group = event.get("actionGroup", "")
     function_name = event.get("function", "")
     params = {p["name"]: p["value"] for p in event.get("parameters", [])}
@@ -197,13 +201,20 @@ def lambda_handler(event, context):
     except Exception as exc:
         result = {"error": str(exc)}
 
+    body = json.dumps(result, default=str)
+    logging.info("Response body length: %d chars", len(body))
+
+    # Bedrock Agents require messageVersion + response wrapper
     return {
-        "actionGroup": action_group,
-        "function": function_name,
-        "functionResponse": {
-            "responseBody": {
-                "TEXT": {"body": json.dumps(result, default=str)}
-            }
+        "messageVersion": "1.0",
+        "response": {
+            "actionGroup": action_group,
+            "function": function_name,
+            "functionResponse": {
+                "responseBody": {
+                    "TEXT": {"body": body}
+                }
+            },
         },
     }
 
