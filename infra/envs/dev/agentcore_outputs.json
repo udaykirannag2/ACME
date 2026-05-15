@@ -1,0 +1,8 @@
+{
+  "env": "dev",
+  "agentcore": {
+    "memory_arn": "arn:aws:bedrock-agentcore:us-east-1:010928194453:memory/acme_finance_dev_memory-F0GIOl5mcE",
+    "gateway_id": "acme-finance-dev-finance-tools-rrlhpdtveg",
+    "gateway_url": "https://acme-finance-dev-finance-tools-rrlhpdtveg.gateway.bedrock-agentcore.us-east-1.amazonaws.com"
+  }
+}

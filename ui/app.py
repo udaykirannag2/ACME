@@ -1,5 +1,5 @@
 """
-ACME Finance Dashboard — Phase 7
+ACME Finance Dashboard — Phase 8
 Run: streamlit run ui/app.py
 """
 import uuid
@@ -28,7 +28,7 @@ with st.sidebar:
     entity_filter = st.selectbox("Entity", ["All", "US", "EMEA", "APAC"])
     entity_id = None if entity_filter == "All" else entity_filter
     st.divider()
-    st.caption("Phases 0–7 on AWS · dbt + Bedrock")
+    st.caption("Phases 0–8 on AWS · dbt + Bedrock AgentCore")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -59,8 +59,8 @@ MOVEMENT_COLORS = {
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_pl, tab_arr, tab_ar, tab_chat = st.tabs(
-    ["📊 P&L", "📈 ARR Bridge", "🧾 AR Aging", "🤖 AI Analyst"]
+tab_pl, tab_arr, tab_ar, tab_chat, tab_commentary, tab_boardpack = st.tabs(
+    ["📊 P&L", "📈 ARR", "💳 AR Aging", "🤖 AI Analyst", "📝 Commentary", "📋 Board Pack"]
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -311,61 +311,270 @@ with tab_ar:
 # ═══════════════════════════════════════════════════════════════
 
 with tab_chat:
-    st.header("🤖 AI Finance Analyst")
-    st.caption(
-        "Ask anything about revenue, expenses, P&L, ARR, or AR. "
-        "Powered by Bedrock Agent + Claude Sonnet 4.6."
-    )
-
+    # ── Session state init ────────────────────────────────────────
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "chat_session_id" not in st.session_state:
         st.session_state.chat_session_id = f"sess-{uuid.uuid4().hex[:12]}"
+    # memory_id is stable per browser session — persists across conversation clears
+    if "memory_id" not in st.session_state:
+        st.session_state.memory_id = f"user-{uuid.uuid4().hex[:16]}"
 
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    # ── Header row with Clear button ──────────────────────────────
+    hdr_col, clear_col = st.columns([5, 1])
+    with hdr_col:
+        st.header("🤖 AI Finance Analyst")
+        st.caption(
+            "Ask anything about revenue, expenses, P&L, ARR, forecasts, or what-if scenarios. "
+            "Powered by Bedrock Agent + Claude Sonnet 4.6 · AgentCore Memory."
+        )
+    with clear_col:
+        st.write("")  # spacer to push button down
+        if st.session_state.messages:
+            if st.button("🗑️ Clear", type="secondary", use_container_width=True):
+                st.session_state.messages = []
+                st.session_state.chat_session_id = f"sess-{uuid.uuid4().hex[:12]}"
+                st.rerun()
 
     SUGGESTED = [
         "What was the gross margin trend by quarter in FY2024?",
+        "Give me a 4-quarter revenue forecast",
+        "What are the top 5 variance drivers vs budget in FY2024?",
+        "What if we cut R&D spend by 15%? Impact on operating margin?",
         "Which customers have invoices more than 60 days overdue?",
-        "Compare operating income across US, EMEA, and APAC for FY2024",
-        "What was the net ARR change in FY2024?",
+        "What is NRR and how is it calculated?",
     ]
 
-    if not st.session_state.messages:
-        st.subheader("Suggested questions")
-        cols = st.columns(2)
-        for i, q in enumerate(SUGGESTED):
-            if cols[i % 2].button(q, use_container_width=True):
-                st.session_state.messages.append({"role": "user", "content": q})
-                st.rerun()
+    # ── Scrollable message history ────────────────────────────────
+    msg_container = st.container(height=520, border=False)
+    with msg_container:
+        if not st.session_state.messages:
+            # Suggested questions inside the message area
+            st.markdown(
+                "<div style='padding-top:2rem; text-align:center; color:#6b7280; font-size:0.9rem;'>"
+                "💡 <b>Get started with a question below, or type your own</b></div>",
+                unsafe_allow_html=True,
+            )
+            st.write("")
+            cols = st.columns(2)
+            for i, q in enumerate(SUGGESTED):
+                if cols[i % 2].button(q, use_container_width=True, key=f"sug_{i}"):
+                    st.session_state.messages.append({"role": "user", "content": q})
+                    st.rerun()
+        else:
+            for msg in st.session_state.messages:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
+    # ── Input pinned below the message area ───────────────────────
     if prompt := st.chat_input("Ask a finance question…"):
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Querying data warehouse…"):
+        # Write the new user message + streaming reply *inside* the same scrollable
+        # container so everything stays in one place while the answer streams in.
+        with msg_container:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            def _stream_response():
                 try:
-                    resp = requests.post(
-                        f"{API_BASE}/chat",
-                        json={
+                    with requests.get(
+                        f"{API_BASE}/chat/stream",
+                        params={
                             "question": prompt,
                             "session_id": st.session_state.chat_session_id,
+                            "memory_id": st.session_state.memory_id,
+                        },
+                        stream=True,
+                        timeout=300,
+                    ) as r:
+                        r.raise_for_status()
+                        for chunk in r.iter_content(chunk_size=None, decode_unicode=True):
+                            if chunk:
+                                yield chunk
+                except Exception as exc:  # noqa: BLE001
+                    yield f"\n\n⚠️ Error: {exc}"
+
+            with st.chat_message("assistant"):
+                answer = st.write_stream(_stream_response())
+
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.rerun()
+
+    # ── Memory expander (below input, out of the way) ─────────────
+    with st.expander("💾 Memory", expanded=False):
+        st.caption(
+            "AgentCore Memory is active. The agent recalls context from previous sessions. "
+            f"Your memory ID: `{st.session_state.memory_id}`"
+        )
+        if st.button("Reset memory ID (new user context)", type="secondary"):
+            st.session_state.memory_id = f"user-{uuid.uuid4().hex[:16]}"
+            st.session_state.messages = []
+            st.session_state.chat_session_id = f"sess-{uuid.uuid4().hex[:12]}"
+            st.rerun()
+
+# ── Commentary tab ────────────────────────────────────────────────────────────
+
+PERIODS = [f"2024{m:02d}" for m in range(1, 13)]
+PERIOD_LABELS = {
+    "202401": "Jan 2024", "202402": "Feb 2024", "202403": "Mar 2024",
+    "202404": "Apr 2024", "202405": "May 2024", "202406": "Jun 2024",
+    "202407": "Jul 2024", "202408": "Aug 2024", "202409": "Sep 2024",
+    "202410": "Oct 2024", "202411": "Nov 2024", "202412": "Dec 2024",
+}
+
+with tab_commentary:
+    st.header("📝 Management Commentary")
+    st.caption(
+        "Generate a CFO-ready board-pack narrative for any period. "
+        "The AI queries variance_rca and the P&L mart, then drafts a 4-paragraph commentary."
+    )
+
+    col_left, col_right = st.columns([1, 2])
+
+    with col_left:
+        st.subheader("Parameters")
+        selected_period = st.selectbox(
+            "Period",
+            options=PERIODS,
+            index=len(PERIODS) - 1,  # default to Dec 2024
+            format_func=lambda p: PERIOD_LABELS.get(p, p),
+            key="commentary_period",
+        )
+        selected_entity = st.selectbox(
+            "Entity",
+            options=["ALL", "US", "EMEA", "APAC"],
+            index=0,
+            key="commentary_entity",
+        )
+        extra_context = st.text_area(
+            "Additional context (optional)",
+            placeholder="e.g. 'EMEA headcount restructuring completed in Sep, one-time charge of $12M expected'",
+            height=100,
+            key="commentary_extra",
+        )
+        generate_btn = st.button(
+            "Generate Commentary",
+            type="primary",
+            use_container_width=True,
+            key="commentary_generate",
+        )
+
+    with col_right:
+        st.subheader("Board Pack Commentary")
+
+        if "commentary_output" not in st.session_state:
+            st.session_state.commentary_output = None
+            st.session_state.commentary_meta = {}
+
+        if generate_btn:
+            with st.spinner("Querying variance data and drafting commentary…"):
+                try:
+                    resp = requests.post(
+                        f"{API_BASE}/commentary",
+                        json={
+                            "period": selected_period,
+                            "entity": selected_entity,
+                            "memory_id": st.session_state.get("memory_id"),
+                            "extra_context": extra_context or None,
                         },
                         timeout=300,
                     )
                     resp.raise_for_status()
-                    answer = resp.json()["answer"]
+                    data = resp.json()
+                    st.session_state.commentary_output = data["commentary"]
+                    st.session_state.commentary_meta = {
+                        "period": data["period"],
+                        "entity": data["entity"],
+                        "session_id": data["session_id"],
+                    }
                 except Exception as exc:
-                    answer = f"⚠️ Error: {exc}"
-            st.markdown(answer)
-            st.session_state.messages.append({"role": "assistant", "content": answer})
+                    st.error(f"⚠️ Error generating commentary: {exc}")
 
-    if st.session_state.messages:
-        if st.button("Clear conversation", type="secondary"):
-            st.session_state.messages = []
-            st.session_state.chat_session_id = f"sess-{uuid.uuid4().hex[:12]}"
-            st.rerun()
+        if st.session_state.commentary_output:
+            meta = st.session_state.commentary_meta
+            st.caption(
+                f"Period: **{PERIOD_LABELS.get(meta.get('period',''), meta.get('period',''))}**  ·  "
+                f"Entity: **{meta.get('entity', '')}**  ·  "
+                f"Session: `{meta.get('session_id', '')}`"
+            )
+            st.markdown("---")
+
+            # Display each paragraph separated by blank line
+            paragraphs = [p.strip() for p in st.session_state.commentary_output.split("\n\n") if p.strip()]
+            for para in paragraphs:
+                st.markdown(para)
+                st.write("")
+
+            st.markdown("---")
+            col_copy, col_dl = st.columns(2)
+            with col_dl:
+                period_label = PERIOD_LABELS.get(meta.get("period", ""), meta.get("period", ""))
+                entity_label = meta.get("entity", "ALL")
+                filename = f"commentary_{meta.get('period', 'unknown')}_{entity_label.replace(' ', '_')}.txt"
+                st.download_button(
+                    label="⬇️ Download as .txt",
+                    data=st.session_state.commentary_output,
+                    file_name=filename,
+                    mime="text/plain",
+                    use_container_width=True,
+                )
+            with col_copy:
+                st.info("💡 Use the download button to save, then paste into your board pack template.")
+        else:
+            st.info(
+                "Select a period and entity, then click **Generate Commentary** to produce "
+                "a CFO-ready board-pack narrative powered by the AI Analyst."
+            )
+
+# ── Board Pack tab ────────────────────────────────────────────────────────────
+
+with tab_boardpack:
+    st.header("📋 Board Pack Generator")
+    st.caption(
+        "Generate a complete CFO board pack PDF for any period — "
+        "P&L summary, ARR waterfall, AR aging, and AI commentary in one document."
+    )
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        bp_period = st.selectbox(
+            "Period", options=PERIODS, index=len(PERIODS)-1,
+            format_func=lambda p: PERIOD_LABELS.get(p, p), key="bp_period"
+        )
+        bp_entity = st.selectbox(
+            "Entity", options=["ALL", "US", "EMEA", "APAC"], key="bp_entity"
+        )
+        bp_btn = st.button("Generate Board Pack", type="primary",
+                           use_container_width=True, key="bp_generate")
+    with col2:
+        if "bp_output" not in st.session_state:
+            st.session_state.bp_output = None
+        if bp_btn:
+            with st.spinner("Assembling board pack (fetching data + generating commentary)…"):
+                try:
+                    resp = requests.post(
+                        f"{API_BASE}/boardpack",
+                        json={"period": bp_period, "entity": bp_entity,
+                              "memory_id": st.session_state.get("memory_id")},
+                        timeout=300,
+                    )
+                    resp.raise_for_status()
+                    st.session_state.bp_output = resp.json()
+                except Exception as exc:
+                    st.error(f"⚠️ {exc}")
+        if st.session_state.bp_output:
+            import base64
+            data = st.session_state.bp_output
+            pdf_bytes = base64.b64decode(data["pdf_base64"])
+            st.success(f"✅ Board pack ready — {len(pdf_bytes)//1024}KB")
+            st.download_button(
+                label="⬇️ Download PDF",
+                data=pdf_bytes,
+                file_name=data["filename"],
+                mime="application/pdf",
+                use_container_width=True,
+            )
+            period_lbl = PERIOD_LABELS.get(data["period"], data["period"])
+            st.caption(f"Period: **{period_lbl}** · Entity: **{data['entity']}**")
+        else:
+            st.info("Select a period and entity, then click **Generate Board Pack**.")

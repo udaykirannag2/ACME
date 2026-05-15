@@ -7,7 +7,7 @@ acme_finance:
       port: 5439
       dbname: dev
       user: acme_admin
-      password: "{{ env_var('REDSHIFT_PASSWORD') }}"
+      password: "{{ env_var('REDSHIFT_PASSWORD', 'ob6=ec=IuT_ArLnlZLcF$osyXwhCZgeX') }}"
       schema: analytics_dev
       threads: 4
       connect_timeout: 30

@@ -121,3 +121,32 @@ module "bedrock" {
   redshift_workgroup_arn = module.redshift_serverless.workgroup_arn
   lambda_source_dir      = "${path.root}/../../../agent/lambdas/text_to_sql"
 }
+
+module "hosting" {
+  source = "../../modules/hosting"
+
+  env                     = var.env
+  aws_region              = var.aws_region
+  bedrock_agent_id        = module.bedrock.agent_id
+  bedrock_agent_alias_id  = module.bedrock.agent_alias_id
+  agentcore_memory_id     = "acme_finance_dev_memory-F0GIOl5mcE"
+  agentcore_memory_arn    = module.bedrock.memory_arn
+  agentcore_strategy_id   = "financeSemanticMemory-jg6xTm9BFx"
+  redshift_workgroup_name = module.redshift_serverless.workgroup_name
+  redshift_workgroup_arn  = module.redshift_serverless.workgroup_arn
+
+  # Empty string disables JWT validation in FastAPI (require_auth passes through).
+  # Re-enable by setting to: try(module.auth.user_pool_id, "") once SAML is wired.
+  cognito_user_pool_id    = ""
+  cognito_client_id       = ""
+}
+
+module "auth" {
+  source = "../../modules/auth"
+
+  env                   = var.env
+  aws_region            = var.aws_region
+  idc_saml_metadata_url = var.idc_saml_metadata_url
+  # Static value to avoid cycle; set after first hosting apply via tfvars
+  cloudfront_domain     = var.cloudfront_domain_static
+}

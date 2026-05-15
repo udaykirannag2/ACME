@@ -27,3 +27,16 @@ variable "my_ip_cidr" {
   type        = string
   default     = null
 }
+
+variable "idc_saml_metadata_url" {
+  type    = string
+  default = ""
+}
+
+# Set after first hosting apply (see terraform output cloudfront_domain).
+# Used by module.auth to build Cognito callback URLs. Avoids dependency cycle
+# (auth → hosting → lambda_url → cloudfront → auth).
+variable "cloudfront_domain_static" {
+  type    = string
+  default = ""
+}

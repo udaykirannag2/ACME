@@ -17,3 +17,18 @@ output "text_to_sql_lambda_arn" {
   value       = aws_lambda_function.text_to_sql.arn
   description = "ARN of the text_to_sql Lambda"
 }
+
+output "gateway_id" {
+  value       = local.agentcore_gateway_id
+  description = "AgentCore Gateway ID"
+}
+
+output "gateway_arn" {
+  value       = local.agentcore_gateway_arn
+  description = "AgentCore Gateway ARN — pass to Agent role policy and Streamlit config"
+}
+
+output "memory_arn" {
+  value       = local.agentcore_memory_arn
+  description = "AgentCore Memory ARN — used as memoryId prefix in FastAPI /chat calls"
+}

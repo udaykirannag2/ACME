@@ -1,8 +1,28 @@
 """Thin wrapper around Redshift Data API for synchronous query execution."""
+import itertools
 import time
 import boto3
 from botocore.config import Config
 from ui.api.config import AWS_REGION, AWS_PROFILE, REDSHIFT_WORKGROUP, REDSHIFT_DATABASE
+
+# Poll schedule: check quickly at first, then back off.
+# Format: (interval_seconds, repeat_count)  — None repeat = infinite
+_POLL_SCHEDULE = [
+    (0.15, 5),   # 0-0.75 s  — fast initial checks
+    (0.5,  5),   # 0.75-3.25 s
+    (1.0,  None),# 3.25 s onward — 1 s per poll, up to max_polls total
+]
+
+
+def _poll_intervals(max_polls: int):
+    """Yield poll intervals following _POLL_SCHEDULE up to max_polls times."""
+    count = 0
+    for interval, repeats in _POLL_SCHEDULE:
+        for _ in range(repeats) if repeats is not None else itertools.repeat(None):
+            if count >= max_polls:
+                return
+            yield interval
+            count += 1
 
 _client = None
 
@@ -24,8 +44,8 @@ def query(sql: str, max_rows: int = 500) -> list[dict]:
     )
     stmt_id = resp["Id"]
 
-    for _ in range(90):
-        time.sleep(1)
+    for interval in _poll_intervals(90):
+        time.sleep(interval)
         status = client.describe_statement(Id=stmt_id)
         if status["Status"] in ("FINISHED", "FAILED", "ABORTED"):
             break

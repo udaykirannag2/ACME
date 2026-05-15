@@ -89,3 +89,32 @@ output "redshift_spectrum_role_arn" {
   value       = module.redshift_serverless.spectrum_role_arn
   description = "IAM role ARN that Redshift uses for Spectrum (external schemas)."
 }
+
+# Phase 8 outputs
+output "gateway_id" {
+  value       = module.bedrock.gateway_id
+  description = "AgentCore Gateway ID"
+}
+
+output "gateway_arn" {
+  value       = module.bedrock.gateway_arn
+  description = "AgentCore Gateway ARN"
+}
+
+output "memory_arn" {
+  value       = module.bedrock.memory_arn
+  description = "AgentCore Memory ARN — used as memoryId in FastAPI /chat calls"
+}
+
+output "api_lambda_url"       { value = try(module.hosting.lambda_function_url, "") }
+output "cloudfront_url"       { value = try("https://${module.hosting.cloudfront_domain_name}", "") }
+output "cloudfront_domain"    { value = try(module.hosting.cloudfront_domain_name, "") }
+output "ecr_repository_url"   { value = try(module.hosting.ecr_repository_url, "") }
+output "lambda_function_name" { value = try(module.hosting.lambda_function_name, "") }
+output "frontend_bucket"      { value = try(module.hosting.frontend_bucket_name, "") }
+output "cf_distribution_id"   { value = try(module.hosting.cloudfront_distribution_id, "") }
+output "cognito_pool_id"      { value = try(module.auth.user_pool_id, "") }
+output "cognito_client_id"    { value = try(module.auth.client_id, "") }
+output "cognito_domain"       { value = try(module.auth.hosted_ui_domain, "") }
+output "saml_acs_url"         { value = try(module.auth.saml_acs_url, "") }
+output "saml_entity_id"       { value = try(module.auth.saml_entity_id, "") }

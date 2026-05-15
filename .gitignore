@@ -25,6 +25,8 @@ override.tf.json
 # tfvars often contain account-specific values; commit only the .example.
 terraform.tfvars
 *.auto.tfvars
+# Terraform archive_file build artifacts (Lambda zips)
+.build/
 
 # AWS / secrets
 .env
@@ -39,6 +41,7 @@ config
 target/
 dbt_packages/
 logs/
+.user.yml
 
 # Jupyter
 .ipynb_checkpoints/
@@ -49,6 +52,18 @@ generators/_out/
 *.parquet
 *.csv
 !docs/reference/*.csv
+
+# Node
+node_modules/
+
+# Course build artifacts (QA screenshots, intermediates)
+docs/course/*.jpg
+docs/course/*.pdf
+docs/course/qa_slides/
+docs/course/qa_thumbs/
+docs/course/s*-qa/
+docs/course/slides/
+~$*.pptx
 
 # OS
 .DS_Store
