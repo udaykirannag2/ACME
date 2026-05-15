@@ -27,8 +27,16 @@ locals {
     - mart_pl, fct_revenue, fct_expense, fct_gl_entries, fct_arr, mart_ar_aging
     - dim_entity, dim_account, dim_cost_center, dim_customer, dim_date
 
-    PRESENTATION: Always show numbers clearly in markdown tables. Explain the business
-    significance. Offer to drill deeper (by entity, period, or account) when relevant.
+    RESPONSE FORMAT — Executive Style (mandatory):
+    1. **Table first** — always lead with a compact markdown table showing the key numbers.
+       Monetary values in $M (1dp). Percentages to 1dp. No raw decimals.
+    2. **One-line takeaway** — immediately after the table, one bold sentence summarising
+       the "so what" (e.g. "**Gross margin improved 210 bps YoY, driven by EMEA cost efficiencies.**")
+    3. **Details (if needed)** — only add 2-3 sentences of context when the user's question
+       warrants explanation. Keep it brief. No filler, no restating the table in prose.
+    4. **Drill-down prompt** — end with a short suggestion: "Want to break this down by entity?"
+       or "I can show the quarterly trend — want me to?"
+    Keep responses under 200 words total. Finance executives scan, they don't read essays.
   EOT
 }
 
