@@ -34,7 +34,7 @@ expense_pivoted as (
         sum(case when pnl_rollup = 'sm'   then total_expense else 0 end) as sales_marketing,
         sum(case when pnl_rollup = 'rd'   then total_expense else 0 end) as research_dev,
         sum(case when pnl_rollup = 'ga'   then total_expense else 0 end) as general_admin,
-        sum(total_expense)                                               as total_opex
+        sum(case when pnl_rollup != 'cogs' then total_expense else 0 end) as total_opex
     from expense
     group by 1, 2, 3, 4
 ),
@@ -55,9 +55,9 @@ final as (
         e.research_dev,
         e.general_admin,
         e.total_opex,
-        r.total_revenue - e.total_opex                     as operating_income,
+        (r.total_revenue - e.cogs) - e.total_opex           as operating_income,
         case when r.total_revenue > 0
-             then (r.total_revenue - e.total_opex) / r.total_revenue
+             then ((r.total_revenue - e.cogs) - e.total_opex) / r.total_revenue
              else null end                                  as operating_margin_pct
 
     from revenue r
