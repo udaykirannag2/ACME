@@ -209,6 +209,226 @@ COGNITO_USER_POOL_ID="", COGNITO_CLIENT_ID=""
 
 **Agent instruction includes tool selection guide** — the agent chooses which action group to invoke based on the user's question type (ad-hoc data → SQL, projections → forecast, anomalies → scan, etc.).
 
+#### Forecasting Engine (Linear Trend + Seasonality)
+
+The `ForecastMetrics` action group and the FastAPI `/metrics/forecast` endpoint share the same algorithm — a zero-dependency linear trend decomposition with multiplicative seasonal adjustment.
+
+**Supported metrics:** `revenue` (from `fct_revenue`), `expense` (from `fct_expense`), `operating_income` (from `mart_pl`)
+
+**Algorithm (4 steps):**
+
+```
+1. QUERY historical monthly actuals from Redshift
+   → Returns time series: [(period_yyyymm, amount), ...]
+
+2. FIT linear trend via ordinary least squares (OLS)
+   → slope = Σ(xᵢ - x̄)(yᵢ - ȳ) / Σ(xᵢ - x̄)²
+   → intercept = ȳ - slope × x̄
+   → trend(t) = intercept + slope × t
+
+3. COMPUTE multiplicative seasonal factors (12-month cycle)
+   → For each month m: factor(m) = avg(actual / trend) across all years
+   → If Q1 historically runs 5% above trend → factor = 1.05
+
+4. PROJECT forward N periods (default: 4 for agent, 6 for API)
+   → projected(t) = trend(t) × seasonal_factor(month(t))
+   → 95% confidence band: projected ± 1.96 × residual_std_dev
+```
+
+**Output structure (per projected period):**
+
+| Field | Description |
+|-------|-------------|
+| `projected_amount` | trend × seasonal factor |
+| `trend_component` | linear trend value only |
+| `seasonal_factor` | multiplicative adjustment (1.0 = no seasonality) |
+| `confidence_low` | projected − 1.96 × σ |
+| `confidence_high` | projected + 1.96 × σ |
+
+**Summary stats returned:** last 4-period average, projected 4-period average, growth vs. recent (%).
+
+**Two invocation paths:**
+
+| Path | Parameters | Default periods |
+|------|-----------|-----------------|
+| Bedrock Agent → `forecast` Lambda | `entity_id?`, `periods_ahead?` | 4 |
+| React SPA → `/metrics/forecast` API | `metric`, `entity_id?`, `periods_ahead?` | 6 |
+
+Both paths query the same Redshift tables and run identical math. The Lambda version is invoked by the Bedrock Agent for natural-language questions ("forecast revenue for next 4 quarters"). The API version powers the React `/forecast` page with interactive charts (Recharts).
+
+---
+
+#### Variance RCA Engine (Actuals vs Budget)
+
+The `VarianceRCA` action group answers the highest-value FP&A question: *why did actual results deviate from the budget?*
+
+**File:** `agent/lambdas/variance_rca/handler.py`
+
+**Algorithm:**
+
+```
+1. QUERY actuals from fct_gl_entries (aggregated by account_id)
+   → Revenue entries: sign-flipped (GL credits → positive amounts)
+   → Expense entries: kept as-is (GL debits)
+
+2. QUERY plan from stg_epm__plan_line (filtered to version_type = 'budget')
+
+3. JOIN actuals to plan on account_id
+   → variance       = actual_amount - plan_amount
+   → variance_pct   = variance / ABS(plan_amount) × 100
+
+4. RANK by ABS(variance) descending, return top N drivers
+```
+
+**Parameters:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `fiscal_year` | Yes | 2024 | Which fiscal year to analyse |
+| `fiscal_quarter` | No | — | Narrow to Q1–Q4 (mapped to period_yyyymm ranges using Jan 31 FY-end) |
+| `entity_id` | No | ALL | Filter to US, EMEA, or APAC |
+| `top_n` | No | 10 | Number of variance drivers to return |
+
+**Quarter-to-month mapping (Jan 31 FY-end):** Q1 = Feb–Apr, Q2 = May–Jul, Q3 = Aug–Oct, Q4 = Nov–Jan (spans two calendar years).
+
+**Output:** Ranked list of accounts with `actual_amount`, `plan_amount`, `variance`, `variance_pct`, and `pnl_rollup` classification. The Bedrock Agent uses this to narrate root-cause explanations to the analyst.
+
+---
+
+#### What-If Simulation Engine (P&L Scenarios)
+
+The `WhatIfSimulation` action group enables hypothetical P&L modelling: *"What if we cut R&D by 15%?"*
+
+**File:** `agent/lambdas/whatif_sim/handler.py`
+
+**Algorithm:**
+
+```
+1. QUERY baseline P&L from mart_pl (aggregated across all periods for the fiscal year)
+   → Columns: total_revenue, cogs, gross_profit, sales_marketing, research_dev,
+              general_admin, total_opex, operating_income
+
+2. APPLY percentage change to the target line item
+   → delta   = baseline[line_item] × (pct_change / 100)
+   → new_val = baseline[line_item] + delta
+
+3. CASCADE downstream recalculations:
+   → If revenue or COGS changed  → recalculate gross_profit
+   → If S&M, R&D, or G&A changed → recalculate total_opex
+   → Always: operating_income = gross_profit − total_opex
+
+4. RETURN baseline vs scenario comparison with bps impact
+```
+
+**Valid line items (with aliases):**
+
+| Line Item | Aliases |
+|-----------|---------|
+| `total_revenue` | revenue |
+| `cogs` | cost of goods sold |
+| `sales_marketing` | S&M, sales and marketing |
+| `research_dev` | R&D, research and development |
+| `general_admin` | G&A, general and administrative |
+| `total_opex` | opex |
+
+**Output per scenario:**
+
+| Field | Description |
+|-------|-------------|
+| `baseline` | Revenue, gross profit, gross margin %, operating income, operating margin % |
+| `scenario_result` | Same metrics after applying the change |
+| `impact` | Delta on the changed line, operating income delta ($), operating margin delta (bps) |
+
+**Important:** `total_opex` in `mart_pl` excludes COGS (S&M + R&D + G&A only). The formula `operating_income = gross_profit − total_opex` depends on this — see the COGS fix in commit `2a1a353`.
+
+---
+
+#### Anomaly Detection Engine (Financial Health Scanner)
+
+The `AnomalyDetection` action group and the FastAPI `/metrics/anomalies` endpoint run 4 rule-based financial anomaly detectors in parallel, then return findings sorted by severity.
+
+**Files:** `agent/lambdas/anomaly_detect/handler.py` (Bedrock Agent path), `ui/api/main.py` (API path — identical logic)
+
+**4 Detectors:**
+
+| Detector | Data Source | Trigger Rule | Severity |
+|----------|------------|--------------|----------|
+| **Aged AR** | `mart_ar_aging` | Invoice >90 days overdue AND >$500K | High if >120 days or >$1M; else Medium |
+| **AP/Expense Spike** | `fct_gl_entries` (S&M, G&A) | Monthly spend >2× the 3-month rolling average | High if >3×; else Medium |
+| **Asset Disposal Loss** | `fct_gl_entries` (Loss on Disposal) | Any disposal loss posted | High if >$200K; Medium if >$50K; else Low |
+| **Budget Variance** | `fct_gl_entries` vs `stg_epm__plan_line` | Actual deviates >25% from plan AND plan >$100K | High if >50%; Medium if >35%; else Low |
+
+**AP Spike detection detail:**
+
+```sql
+-- Rolling 3-month average (excluding current month)
+AVG(month_amount) OVER (
+    PARTITION BY entity_id, pnl_rollup
+    ORDER BY period_yyyymm
+    ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING
+) AS rolling_3m_avg
+
+-- Flagged if current month > 2× rolling average
+WHERE month_amount > 2 * rolling_3m_avg
+```
+
+**Output structure:**
+
+```json
+{
+  "anomalies": [...],        // sorted by severity (high → medium → low)
+  "total_count": 12,
+  "high_severity": 3,
+  "medium_severity": 6,
+  "low_severity": 3
+}
+```
+
+Each anomaly includes: `anomaly_type`, `severity`, `entity_id`, `amount`, human-readable `description`, and type-specific fields (e.g., `days_overdue`, `ratio`, `variance_pct`).
+
+**Two invocation paths:**
+
+| Path | Trigger |
+|------|---------|
+| Bedrock Agent → `anomaly_detect` Lambda | NL questions: "Any anomalies?", "Run a financial health check" |
+| React SPA → `/metrics/anomalies` API | `/anomalies` page with severity badges and filtering |
+
+---
+
+#### Metric Glossary (Static KPI Definitions)
+
+The `MetricGlossary` action group provides canonical business definitions so the agent can explain what metrics mean, not just return numbers.
+
+**File:** `agent/lambdas/describe_metric/handler.py`
+
+**No database access** — definitions are a static Python dictionary (14 metrics). This keeps the Lambda at 30s timeout and avoids unnecessary Redshift queries.
+
+**Covered metrics:**
+
+| Category | Metrics |
+|----------|---------|
+| Revenue | ARR, NRR, GRR, Churn Rate |
+| Profitability | Gross Margin, Operating Margin, EBITDA Margin |
+| Efficiency | CAC, Magic Number, Rule of 40 |
+| Cash/AR | DSO, AR Aging |
+| Expense | OpEx |
+
+**Each metric entry includes:**
+
+| Field | Example (ARR) |
+|-------|---------------|
+| `name` | Annual Recurring Revenue (ARR) |
+| `definition` | Annualised value of all active subscription contracts |
+| `formula` | `SUM(ending_arr)` for latest `period_yyyymm` |
+| `table` | `fct_arr` |
+| `unit` | USD |
+| `good_direction` | higher |
+| `benchmark` | *(where applicable)* |
+
+**Lookup behaviour:** Exact match on normalised key → partial match → returns suggestions if multiple matches → error with full list of available metrics.
+
+---
+
 #### AgentCore Memory (Semantic)
 
 | Attribute | Value |
@@ -553,6 +773,25 @@ infra/envs/dev/main.tf
 **Chose:** SAML 2.0  
 **Reason:** OAuth 2.0 apps in IAM Identity Center are exclusively for Trusted Identity Propagation (token exchange to AWS managed services like Redshift, S3). SAML 2.0 is the correct protocol for federating external apps into Cognito.  
 **Trade-off:** Requires manual SAML app registration in IAM Identity Center console (not automatable via Terraform).
+
+### Lambda OLS Forecasting vs SageMaker
+
+**Chose:** Zero-dependency linear trend + seasonality in Lambda (~60 lines of Python)  
+**Reason (5 factors):**
+
+1. **Cost** — A SageMaker real-time endpoint (ml.t3.medium) costs ~$50/month minimum, which alone hits the project's entire $50/month budget target. The Lambda forecast runs in <1s per invocation and costs effectively $0 at lab traffic.
+2. **Data volume** — The time series is 36 monthly data points (3 fiscal years). OLS regression on 36 points is trivially fast; ML infrastructure is overkill.
+3. **No training cycle** — OLS is deterministic and computed on every request from current warehouse data. There's no model to train, retrain, version, or deploy — no SageMaker training jobs, model registry, or endpoint management.
+4. **Operational simplicity** — The forecast code runs inside the same Lambda + Redshift Data API pattern as every other tool. Adding SageMaker means a new IAM role, VPC endpoint or NAT Gateway (~$32/month), model artifact bucket, and endpoint auto-scaling configuration.
+5. **Adequate accuracy** — For a finance planning tool showing directional trend + seasonality to a CFO, the linear decomposition method is standard practice (it's what most FP&A teams use in Excel). The 95% confidence band from residual std dev communicates uncertainty honestly.
+
+**When SageMaker would be the right call:**
+- Hundreds of SKU-level or customer-level time series requiring hierarchical forecasting (→ SageMaker Canvas or Amazon Forecast)
+- Sub-daily granularity with complex exogenous variables (marketing spend, macro indicators)
+- Production SLA requiring <50ms p99 latency on predictions (→ SageMaker real-time endpoint with model compilation)
+- Model experimentation lifecycle where data scientists need notebooks, experiments, and A/B testing
+
+**Trade-off:** The current approach won't capture non-linear patterns (market shocks, S-curves in adoption). If ACME's growth pattern becomes non-linear, upgrading to Prophet or statsforecast inside the same Lambda is the next step before reaching for SageMaker.
 
 ### Auth Disabled by Default
 
