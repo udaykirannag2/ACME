@@ -199,7 +199,7 @@ export default function Chat() {
                   ) : msg.content === '' && isStreaming && i === messages.length - 1 ? (
                     <TypingDots />
                   ) : (
-                    <div className="prose prose-sm max-w-none prose-table:text-[12px]">
+                    <div className="chat-md">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {msg.content}
                       </ReactMarkdown>
