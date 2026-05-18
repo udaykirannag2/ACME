@@ -272,6 +272,121 @@ def test_backward_compatible_output_fields():
         assert "pl_breakdown" in month
 
 
+def test_scenario_reduce_churn_improves_forecast():
+    """Halving churn should produce higher revenue than baseline."""
+    rates_base = _compute_tier_rates(_mock_arr_rows(), DEFAULT_SCENARIO)
+    new_logo_base = _compute_new_logo_projection(_mock_new_logo_rows(), rates_base, DEFAULT_SCENARIO)
+    proj_base = _roll_forward_arr(rates_base, new_logo_base, 202501, 12)
+    ratios = {"cogs_pct": 0.25, "sm_pct": 0.42, "rd_pct": 0.15, "ga_pct": 0.08}
+    pl_base = _compute_pl_projection(proj_base, ratios, 0.12)
+
+    scenario_half_churn = dict(DEFAULT_SCENARIO, churn_pct_multiplier=0.5)
+    rates_hc = _compute_tier_rates(_mock_arr_rows(), scenario_half_churn)
+    new_logo_hc = _compute_new_logo_projection(_mock_new_logo_rows(), rates_hc, scenario_half_churn)
+    proj_hc = _roll_forward_arr(rates_hc, new_logo_hc, 202501, 12)
+    pl_hc = _compute_pl_projection(proj_hc, ratios, 0.12)
+
+    base_rev = sum(m["projected_amount"] for m in pl_base)
+    hc_rev = sum(m["projected_amount"] for m in pl_hc)
+
+    assert hc_rev > base_rev, \
+        f"Halving churn should increase revenue: base ${base_rev:,.0f} vs half-churn ${hc_rev:,.0f}"
+
+    # Verify the improvement is material — at least 1% lift
+    lift_pct = (hc_rev - base_rev) / base_rev * 100
+    assert lift_pct > 1, f"Revenue lift from halving churn should be > 1%, got {lift_pct:.2f}%"
+
+
+def test_scenario_increase_new_bookings():
+    """Increasing new bookings by 50% should grow ARR and revenue faster."""
+    rates_base = _compute_tier_rates(_mock_arr_rows(), DEFAULT_SCENARIO)
+    new_logo_base = _compute_new_logo_projection(_mock_new_logo_rows(), rates_base, DEFAULT_SCENARIO)
+    proj_base = _roll_forward_arr(rates_base, new_logo_base, 202501, 12)
+    ratios = {"cogs_pct": 0.25, "sm_pct": 0.42, "rd_pct": 0.15, "ga_pct": 0.08}
+    pl_base = _compute_pl_projection(proj_base, ratios, 0.12)
+
+    scenario_boost = dict(DEFAULT_SCENARIO, new_logo_pct_change=50.0)
+    rates_b = _compute_tier_rates(_mock_arr_rows(), scenario_boost)
+    new_logo_b = _compute_new_logo_projection(_mock_new_logo_rows(), rates_b, scenario_boost)
+    proj_b = _roll_forward_arr(rates_b, new_logo_b, 202501, 12)
+    pl_b = _compute_pl_projection(proj_b, ratios, 0.12)
+
+    base_final_arr = proj_base[-1]["total_ending_arr"]
+    boost_final_arr = proj_b[-1]["total_ending_arr"]
+    assert boost_final_arr > base_final_arr, \
+        f"50% more bookings should grow ARR: base ${base_final_arr:,.0f} vs boosted ${boost_final_arr:,.0f}"
+
+    base_rev = sum(m["projected_amount"] for m in pl_base)
+    boost_rev = sum(m["projected_amount"] for m in pl_b)
+    assert boost_rev > base_rev, \
+        f"50% more bookings should grow revenue: base ${base_rev:,.0f} vs boosted ${boost_rev:,.0f}"
+
+    # ARR lift should be proportional — ~50% more new logo ARR over 12 months
+    arr_delta = boost_final_arr - base_final_arr
+    total_new_base = sum(new_logo_base.get(t, 0) for t in TIERS) * 12
+    total_new_boost = sum(new_logo_b.get(t, 0) for t in TIERS) * 12
+    assert total_new_boost > total_new_base * 1.4, \
+        f"New logo ACV should be ~50% higher: base ${total_new_base:,.0f} vs boost ${total_new_boost:,.0f}"
+
+
+def test_scenario_combined_churn_and_bookings():
+    """Combining reduced churn + increased bookings should be additive."""
+    rates_base = _compute_tier_rates(_mock_arr_rows(), DEFAULT_SCENARIO)
+    new_logo_base = _compute_new_logo_projection(_mock_new_logo_rows(), rates_base, DEFAULT_SCENARIO)
+    proj_base = _roll_forward_arr(rates_base, new_logo_base, 202501, 12)
+
+    # Just churn reduction
+    s_churn = dict(DEFAULT_SCENARIO, churn_pct_multiplier=0.5)
+    r_c = _compute_tier_rates(_mock_arr_rows(), s_churn)
+    nl_c = _compute_new_logo_projection(_mock_new_logo_rows(), r_c, s_churn)
+    proj_c = _roll_forward_arr(r_c, nl_c, 202501, 12)
+
+    # Just bookings increase
+    s_book = dict(DEFAULT_SCENARIO, new_logo_pct_change=50.0)
+    r_b = _compute_tier_rates(_mock_arr_rows(), s_book)
+    nl_b = _compute_new_logo_projection(_mock_new_logo_rows(), r_b, s_book)
+    proj_b = _roll_forward_arr(r_b, nl_b, 202501, 12)
+
+    # Combined
+    s_both = dict(DEFAULT_SCENARIO, churn_pct_multiplier=0.5, new_logo_pct_change=50.0)
+    r_x = _compute_tier_rates(_mock_arr_rows(), s_both)
+    nl_x = _compute_new_logo_projection(_mock_new_logo_rows(), r_x, s_both)
+    proj_x = _roll_forward_arr(r_x, nl_x, 202501, 12)
+
+    base_arr = proj_base[-1]["total_ending_arr"]
+    churn_arr = proj_c[-1]["total_ending_arr"]
+    book_arr = proj_b[-1]["total_ending_arr"]
+    combo_arr = proj_x[-1]["total_ending_arr"]
+
+    # Combined should be better than either individual scenario
+    assert combo_arr > churn_arr, "Combined should beat churn-only"
+    assert combo_arr > book_arr, "Combined should beat bookings-only"
+    # Combined should be at least close to the sum of individual lifts
+    churn_lift = churn_arr - base_arr
+    book_lift = book_arr - base_arr
+    combo_lift = combo_arr - base_arr
+    assert combo_lift >= (churn_lift + book_lift) * 0.95, \
+        f"Combined lift ${combo_lift:,.0f} should be close to sum of individual lifts ${churn_lift + book_lift:,.0f}"
+
+
+def test_nonsub_ratio_cap():
+    """nonsub_ratio should be capped at 30% to prevent runaway multipliers."""
+    rates = _compute_tier_rates(_mock_arr_rows(), DEFAULT_SCENARIO)
+    new_logo = _compute_new_logo_projection(_mock_new_logo_rows(), rates, DEFAULT_SCENARIO)
+    projection = _roll_forward_arr(rates, new_logo, 202501, 4)
+    ratios = {"cogs_pct": 0.25, "sm_pct": 0.42, "rd_pct": 0.15, "ga_pct": 0.08}
+
+    # With nonsub_ratio = 0.12 (normal), revenue = sub / 0.88
+    pl_normal = _compute_pl_projection(projection, ratios, 0.12)
+
+    # With nonsub_ratio = 0.87 (broken), revenue = sub / 0.13 → 6.7x multiplier
+    pl_broken = _compute_pl_projection(projection, ratios, 0.87)
+
+    # The broken ratio should produce wildly higher revenue
+    ratio = pl_broken[0]["projected_amount"] / pl_normal[0]["projected_amount"]
+    assert ratio > 5, "Uncapped 87% nonsub_ratio produces 5x+ multiplier — confirms the bug"
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

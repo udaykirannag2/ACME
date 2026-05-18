@@ -111,7 +111,7 @@ def _build_driver_forecast(
         ),
         movements AS (
             SELECT
-                a.segment_tier,
+                COALESCE(a.segment_tier, 'commercial') AS segment_tier,
                 a.movement_type,
                 SUM(a.arr_change)   AS total_arr_change,
                 SUM(a.starting_arr) AS total_starting_arr
@@ -119,18 +119,18 @@ def _build_driver_forecast(
             INNER JOIN t4q ON a.period_yyyymm = t4q.period_yyyymm
             WHERE a.movement_type IN ('new','expansion','contraction','churn','renewal')
             {entity_filter_arr}
-            GROUP BY a.segment_tier, a.movement_type
+            GROUP BY COALESCE(a.segment_tier, 'commercial'), a.movement_type
         ),
         ending AS (
             SELECT
-                a.segment_tier,
+                COALESCE(a.segment_tier, 'commercial') AS segment_tier,
                 SUM(a.ending_arr) AS tier_ending_arr
             FROM analytics_dev_marts.fct_arr a
             CROSS JOIN last_period lp
             WHERE a.period_yyyymm = lp.max_period
               AND a.movement_type IN ('new','expansion','contraction','churn','renewal')
             {entity_filter_arr}
-            GROUP BY a.segment_tier
+            GROUP BY COALESCE(a.segment_tier, 'commercial')
         )
         SELECT
             COALESCE(m.segment_tier, e.segment_tier) AS segment_tier,
@@ -155,14 +155,14 @@ def _build_driver_forecast(
         ),
         new_bookings AS (
             SELECT
-                a.segment_tier,
+                COALESCE(a.segment_tier, 'commercial') AS segment_tier,
                 SUM(a.arr_change)   AS total_new_arr,
                 COUNT(DISTINCT a.period_yyyymm) AS n_months
             FROM analytics_dev_marts.fct_arr a
             INNER JOIN t4q ON a.period_yyyymm = t4q.period_yyyymm
             WHERE a.movement_type = 'new'
             {entity_filter_arr}
-            GROUP BY a.segment_tier
+            GROUP BY COALESCE(a.segment_tier, 'commercial')
         ),
         pipeline AS (
             SELECT
@@ -249,15 +249,33 @@ def _build_driver_forecast(
         rates_by_tier, new_logo, last_period, periods_ahead,
     )
 
-    # ── Non-subscription revenue uplift ──────────────────────────────────
-    # fct_arr is subscription-only (~88% of revenue). Compute uplift
-    # from historical total_revenue vs subscription ARR.
+    # ── Scale ARR to match actual revenue ────────────────────────────────
+    # fct_arr tracks subscription ARR. When generated data is at a
+    # different scale than ERP revenue (e.g., CRM covers a subset of
+    # customers), we scale the ARR projection to match actual revenue.
+    # This preserves the growth rates while aligning the level.
     total_ending_arr = sum(
         r.get("ending_arr", 0) for r in rates_by_tier.values()
     )
     sub_monthly = total_ending_arr / 12 if total_ending_arr else 0
     last_actual_rev = history[-1][1] if history else sub_monthly
-    nonsub_ratio = max(0, (last_actual_rev - sub_monthly) / last_actual_rev) if last_actual_rev > 0 else 0.12
+
+    # Non-subscription revenue is typically ~12% (pro services, etc.)
+    SUB_SHARE = 0.88  # subscription share of total revenue
+    nonsub_ratio = 1.0 - SUB_SHARE  # = 0.12
+
+    # If ARR-derived subscription revenue is way off from actual, scale it
+    implied_sub_rev = last_actual_rev * SUB_SHARE
+    if sub_monthly > 0 and implied_sub_rev > 0:
+        arr_scale = implied_sub_rev / sub_monthly
+        if abs(arr_scale - 1.0) > 0.25:
+            # ARR is more than 25% off from actual — rescale projections
+            for proj in arr_projection:
+                proj["total_ending_arr"] = round(proj["total_ending_arr"] * arr_scale, 2)
+                for tier in proj.get("tiers", {}).values():
+                    for k in ("starting_arr", "churn", "contraction", "expansion", "new", "ending_arr"):
+                        if k in tier:
+                            tier[k] = round(tier[k] * arr_scale, 2)
 
     # ── Build projections ────────────────────────────────────────────────
     projections = _compute_pl_projection(arr_projection, opex_ratios, nonsub_ratio)
@@ -313,7 +331,7 @@ def _build_driver_forecast(
                 for tier, data in rates_by_tier.items()
             },
             "new_logo_monthly_arr": round(
-                sum(v for v in new_logo.values()), 2
+                sum(new_logo.get(t, 0) for t in TIERS), 2
             ),
             "nonsub_revenue_pct": round(nonsub_ratio * 100, 2),
             "opex_ratios": {k: round(v, 4) for k, v in opex_ratios.items()},
@@ -424,6 +442,19 @@ def _compute_new_logo_projection(
     result = {}
     for tier in TIERS:
         result[tier] = tier_runrate.get(tier, 0) * multiplier
+
+    # Cap total new logo at 25% of starting ARR annually.
+    # Synthetic data can produce unrealistically high new-logo rates
+    # (e.g., 200%+ of ARR). Real SaaS companies are typically 15-25%.
+    total_ending = sum(r.get("ending_arr", 0) for r in rates_by_tier.values())
+    if total_ending > 0:
+        total_new_annual = sum(result.get(t, 0) for t in TIERS) * 12
+        max_new_annual = total_ending * 0.25  # 25% cap
+        if total_new_annual > max_new_annual:
+            cap_ratio = max_new_annual / total_new_annual
+            for tier in TIERS:
+                if tier in result:
+                    result[tier] *= cap_ratio
 
     # Store pipeline for potential near-term blending
     result["_pipeline_total"] = pipeline_total * multiplier
