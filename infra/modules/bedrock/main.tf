@@ -7,7 +7,7 @@ locals {
 
     TOOL SELECTION GUIDE:
     - Ad-hoc data questions → use QueryFinanceData (execute_sql / describe_schema)
-    - Revenue or expense projections → use ForecastMetrics (forecast_revenue / forecast_expense)
+    - Revenue, expense, or operating income projections → use ForecastMetrics (forecast_revenue / forecast_expense / forecast_operating_income). The model uses ARR cohort drivers (retention, expansion, churn, new logos) by tier. Pass scenario_overrides JSON to test scenarios like doubled churn.
     - Actual vs. budget gaps → use VarianceRCA (variance_rca)
     - "What if we change X by Y%?" → use WhatIfSimulation (whatif_sim)
     - Definition of a KPI or metric → use MetricGlossary (describe_metric / list_metrics)
@@ -337,7 +337,7 @@ resource "aws_bedrockagent_agent_action_group" "forecast_metrics" {
   agent_id          = aws_bedrockagent_agent.finance.agent_id
   agent_version     = "DRAFT"
   action_group_name = "ForecastMetrics"
-  description       = "Generate 4-quarter revenue and expense projections using linear trend and seasonality"
+  description       = "Driver-based ARR cohort model: projects revenue, expenses, and operating income using tier-specific retention/expansion/churn rates and pipeline-weighted new logo bookings"
 
   action_group_executor {
     lambda = aws_lambda_function.forecast.arn
@@ -347,7 +347,7 @@ resource "aws_bedrockagent_agent_action_group" "forecast_metrics" {
     member_functions {
       functions {
         name        = "forecast_revenue"
-        description = "Project revenue for the next N quarters using historical trend and seasonal patterns"
+        description = "Project monthly revenue using ARR cohort model with tier-specific retention, expansion, churn, and new logo rates"
         parameters {
           map_block_key = "entity_id"
           type          = "string"
@@ -357,14 +357,20 @@ resource "aws_bedrockagent_agent_action_group" "forecast_metrics" {
         parameters {
           map_block_key = "periods_ahead"
           type          = "integer"
-          description   = "Number of monthly periods to forecast (default 4)."
+          description   = "Number of monthly periods to forecast (default 12)."
+          required      = false
+        }
+        parameters {
+          map_block_key = "scenario_overrides"
+          type          = "string"
+          description   = "Optional JSON: {churn_pct_multiplier, expansion_pct_multiplier, new_logo_pct_change}. Example: {\"churn_pct_multiplier\": 2.0} doubles churn."
           required      = false
         }
       }
 
       functions {
         name        = "forecast_expense"
-        description = "Project total expenses for the next N quarters using historical trend and seasonal patterns"
+        description = "Project monthly expenses driven by forecasted revenue and trailing opex ratios (COGS, S&M, R&D, G&A)"
         parameters {
           map_block_key = "entity_id"
           type          = "string"
@@ -374,7 +380,36 @@ resource "aws_bedrockagent_agent_action_group" "forecast_metrics" {
         parameters {
           map_block_key = "periods_ahead"
           type          = "integer"
-          description   = "Number of monthly periods to forecast (default 4)."
+          description   = "Number of monthly periods to forecast (default 12)."
+          required      = false
+        }
+        parameters {
+          map_block_key = "scenario_overrides"
+          type          = "string"
+          description   = "Optional JSON: {churn_pct_multiplier, expansion_pct_multiplier, new_logo_pct_change}."
+          required      = false
+        }
+      }
+
+      functions {
+        name        = "forecast_operating_income"
+        description = "Project monthly operating income (revenue minus COGS minus OpEx) using driver-based model"
+        parameters {
+          map_block_key = "entity_id"
+          type          = "string"
+          description   = "Optional entity filter: US, EMEA, or APAC. Omit for all entities."
+          required      = false
+        }
+        parameters {
+          map_block_key = "periods_ahead"
+          type          = "integer"
+          description   = "Number of monthly periods to forecast (default 12)."
+          required      = false
+        }
+        parameters {
+          map_block_key = "scenario_overrides"
+          type          = "string"
+          description   = "Optional JSON: {churn_pct_multiplier, expansion_pct_multiplier, new_logo_pct_change}."
           required      = false
         }
       }

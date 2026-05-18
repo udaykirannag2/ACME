@@ -256,6 +256,7 @@ def _post_ar_invoices(
     builder: GLBuilder,
     invoices: list[ARInvoiceRow],
     customers: list[CustomerRow],
+    cutoff_yyyymm: int | None = None,
 ) -> None:
     """DR AR-Trade / CR Deferred Revenue. Aggregated per (period × entity)."""
     if not invoices:
@@ -269,6 +270,8 @@ def _post_ar_invoices(
     by_pe: dict[tuple[int, str], float] = defaultdict(float)
     for inv in invoices:
         period = inv.invoice_date.year * 100 + inv.invoice_date.month
+        if cutoff_yyyymm and period > cutoff_yyyymm:
+            continue
         entity_id = customer_entity.get(inv.customer_id, "US")
         by_pe[(period, entity_id)] += inv.amount
 
@@ -332,8 +335,9 @@ def _post_revenue_recognition(
     by_pes: dict[tuple[int, str, str], float] = defaultdict(float)
 
     for inv in invoices:
-        # Use full service period to calculate per_month (preserves correct ratable amount),
-        # then clip to cutoff for which months actually get GL entries.
+        # Use full service period to calculate per_month (correct ratable amount).
+        # Only post entries for months within the cutoff boundary; revenue for
+        # months beyond the cutoff stays as deferred on the balance sheet.
         all_months = _months_in_service_period(inv)
         if not all_months:
             continue
@@ -393,6 +397,7 @@ def _post_ar_receipts(
     invoices: list[ARInvoiceRow],
     receipts: list[ARReceiptRow],
     customers: list[CustomerRow],
+    cutoff_yyyymm: int | None = None,
 ) -> None:
     if not receipts:
         return
@@ -404,6 +409,8 @@ def _post_ar_receipts(
     by_pe: dict[tuple[int, str], float] = defaultdict(float)
     for r in receipts:
         period = r.receipt_date.year * 100 + r.receipt_date.month
+        if cutoff_yyyymm and period > cutoff_yyyymm:
+            continue
         cust_id = inv_to_customer.get(r.ar_invoice_id)
         if cust_id is None:
             continue
@@ -436,6 +443,7 @@ def _post_ap_invoices(
     builder: GLBuilder,
     invoices: list[APInvoiceRow],
     cost_centers: list[CostCenterRow],
+    cutoff_yyyymm: int | None = None,
 ) -> None:
     if not invoices:
         return
@@ -445,6 +453,8 @@ def _post_ap_invoices(
     by_key: dict[tuple[int, str, str], float] = defaultdict(float)
     for inv in invoices:
         period = inv.invoice_date.year * 100 + inv.invoice_date.month
+        if cutoff_yyyymm and period > cutoff_yyyymm:
+            continue
         by_key[(period, inv.cost_center_id, inv.account_id)] += inv.amount
 
     ap_aid = builder.aid("Accounts Payable - Trade")
@@ -488,6 +498,7 @@ def _post_ap_payments(
     invoices: list[APInvoiceRow],
     payments: list[APPaymentRow],
     cost_centers: list[CostCenterRow],
+    cutoff_yyyymm: int | None = None,
 ) -> None:
     if not payments:
         return
@@ -504,6 +515,8 @@ def _post_ap_payments(
         if cc is None:
             continue
         period = p.payment_date.year * 100 + p.payment_date.month
+        if cutoff_yyyymm and period > cutoff_yyyymm:
+            continue
         by_pe[(period, cc.entity_id)] += p.amount
 
     ap_aid = builder.aid("Accounts Payable - Trade")
@@ -741,11 +754,11 @@ def build_gl(
     cutoff_yyyymm = last_fy_end.year * 100 + last_fy_end.month
 
     _post_opening_balances(builder, entities_list, scale)
-    _post_ar_invoices(builder, ar_invoices, customers)
+    _post_ar_invoices(builder, ar_invoices, customers, cutoff_yyyymm=cutoff_yyyymm)
     _post_revenue_recognition(builder, ar_invoices, customers, cutoff_yyyymm=cutoff_yyyymm)
-    _post_ar_receipts(builder, ar_invoices, ar_receipts, customers)
-    _post_ap_invoices(builder, ap_invoices, cost_centers)
-    _post_ap_payments(builder, ap_invoices, ap_payments, cost_centers)
+    _post_ar_receipts(builder, ar_invoices, ar_receipts, customers, cutoff_yyyymm=cutoff_yyyymm)
+    _post_ap_invoices(builder, ap_invoices, cost_centers, cutoff_yyyymm=cutoff_yyyymm)
+    _post_ap_payments(builder, ap_invoices, ap_payments, cost_centers, cutoff_yyyymm=cutoff_yyyymm)
     _post_fa_acquisitions(builder, fixed_assets)
     _post_fa_depreciation(builder, fixed_assets, fa_depreciation, cost_centers)
     _post_pending_journals(builder, sbc_pendings)

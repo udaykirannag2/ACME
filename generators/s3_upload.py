@@ -65,6 +65,31 @@ def upload_to_s3(
         raise RuntimeError(f"cannot access bucket {bucket}: {e}") from e
 
     files = list(_walk_files(out_root))
+
+    # Collect top-level prefixes being uploaded (erp/, epm/, crm/) so we can
+    # delete stale objects before uploading. This prevents old data from
+    # persisting in the Glue catalog / Iceberg tables.
+    prefixes_to_clean: set[str] = set()
+    for f in files:
+        rel = f.relative_to(out_root).as_posix()
+        top = rel.split("/")[0]  # "erp", "epm", or "crm"
+        prefixes_to_clean.add(top + "/")
+
+    if not dry_run:
+        for prefix in sorted(prefixes_to_clean):
+            paginator = s3.get_paginator("list_objects_v2")
+            to_delete: list[dict[str, str]] = []
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    to_delete.append({"Key": obj["Key"]})
+            if to_delete:
+                # Delete in batches of 1000
+                for i in range(0, len(to_delete), 1000):
+                    s3.delete_objects(
+                        Bucket=bucket,
+                        Delete={"Objects": to_delete[i : i + 1000]},
+                    )
+
     total_bytes = 0
     uploaded = 0
     for f in files:

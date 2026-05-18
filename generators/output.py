@@ -1,6 +1,6 @@
 """Writer abstractions for converting dataclass rows to CSV / Parquet.
 
-ERP tables → CSV (for Postgres COPY in Phase 3).
+ERP tables → CSV (for Postgres COPY in Phase 3) + Parquet (for Glue raw catalog).
 EPM/CRM tables → Parquet partitioned by period_yyyymm or snapshot_date
 (Hive-style), matching the Glue schema spec in
 warehouse/ddl/raw/02_epm_crm_glue_tables.md.
@@ -113,8 +113,18 @@ def write_parquet(
 
 
 def write_erp_table(rows: Iterable[Any], out_root: Path, table_name: str) -> int:
-    """Convenience: write ERP table as CSV at out_root/erp/<table>.csv."""
-    return write_csv(rows, out_root / "erp" / f"{table_name}.csv")
+    """Write ERP table as both CSV (for Postgres COPY) and Parquet (for Glue).
+
+    CSV:     out_root/erp/<table>.csv
+    Parquet: out_root/erp/<table>/<table>.parquet  (matches Glue raw catalog layout)
+    """
+    rows_list = list(rows)
+    # CSV for backward compatibility / Postgres COPY
+    count = write_csv(rows_list, out_root / "erp" / f"{table_name}.csv")
+    # Parquet for Glue raw catalog (non-partitioned, in subdirectory)
+    if rows_list:
+        write_parquet(rows_list, out_root / "erp" / table_name)
+    return count
 
 
 def write_epm_table(
