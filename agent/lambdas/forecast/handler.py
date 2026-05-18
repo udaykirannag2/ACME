@@ -58,6 +58,12 @@ def lambda_handler(event, context):
 def forecast_metric(metric: str, entity_id: str | None, periods_ahead: int) -> dict:
     entity_filter = f"AND entity_id = '{entity_id}'" if entity_id else ""
 
+    # Only include complete fiscal-year periods to avoid tail-data cliffs.
+    # The generated data covers FY23-FY25 (202202-202501). Months beyond
+    # the last FY have only residual revenue from existing contracts and
+    # would poison the trend model.
+    fy_cutoff_filter = "AND fiscal_year IN (2023, 2024, 2025)"
+
     if metric == "revenue":
         sql = f"""
             SELECT
@@ -65,6 +71,7 @@ def forecast_metric(metric: str, entity_id: str | None, periods_ahead: int) -> d
                 SUM(revenue_amount) AS amount
             FROM analytics_dev_marts.fct_revenue
             WHERE 1=1 {entity_filter}
+            {fy_cutoff_filter}
             GROUP BY period_yyyymm
             ORDER BY period_yyyymm
         """
@@ -73,6 +80,7 @@ def forecast_metric(metric: str, entity_id: str | None, periods_ahead: int) -> d
             SELECT period_yyyymm, SUM(operating_income) AS amount
             FROM analytics_dev_marts.mart_pl
             WHERE 1=1 {entity_filter}
+            {fy_cutoff_filter}
             GROUP BY period_yyyymm
             ORDER BY period_yyyymm
         """
@@ -83,6 +91,7 @@ def forecast_metric(metric: str, entity_id: str | None, periods_ahead: int) -> d
                 SUM(expense_amount) AS amount
             FROM analytics_dev_marts.fct_expense
             WHERE 1=1 {entity_filter}
+            {fy_cutoff_filter}
             GROUP BY period_yyyymm
             ORDER BY period_yyyymm
         """

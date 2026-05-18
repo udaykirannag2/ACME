@@ -294,14 +294,21 @@ def _post_ar_invoices(
 # Step 3 — Revenue recognition (ratable)
 # =============================================================================
 
-def _months_in_service_period(inv: ARInvoiceRow) -> list[int]:
-    """Return list of yyyymm covered by the invoice's service period (inclusive)."""
+def _months_in_service_period(inv: ARInvoiceRow, cutoff_yyyymm: int | None = None) -> list[int]:
+    """Return list of yyyymm covered by the invoice's service period (inclusive).
+
+    If cutoff_yyyymm is set, months beyond that boundary are excluded.
+    Revenue for those months remains as deferred revenue on the balance sheet.
+    """
     start = inv.service_period_start
     end = inv.service_period_end
     out = []
     cursor = date(start.year, start.month, 1)
     while cursor <= end:
-        out.append(cursor.year * 100 + cursor.month)
+        period = cursor.year * 100 + cursor.month
+        if cutoff_yyyymm and period > cutoff_yyyymm:
+            break
+        out.append(period)
         cursor = cursor + relativedelta(months=1)
     return out
 
@@ -310,10 +317,12 @@ def _post_revenue_recognition(
     builder: GLBuilder,
     invoices: list[ARInvoiceRow],
     customers: list[CustomerRow],
+    cutoff_yyyymm: int | None = None,
 ) -> None:
     """For each AR invoice, recognize revenue ratably over its service period.
 
     Aggregated by (period × entity × segment).
+    If cutoff_yyyymm is set, revenue beyond that period stays as deferred revenue.
     """
     country_to_entity = _country_to_entity_map()
     customer_entity = {c.customer_id: country_to_entity.get(c.billing_country, "US")
@@ -323,10 +332,13 @@ def _post_revenue_recognition(
     by_pes: dict[tuple[int, str, str], float] = defaultdict(float)
 
     for inv in invoices:
-        months = _months_in_service_period(inv)
-        if not months:
+        # Use full service period to calculate per_month (preserves correct ratable amount),
+        # then clip to cutoff for which months actually get GL entries.
+        all_months = _months_in_service_period(inv)
+        if not all_months:
             continue
-        per_month = inv.amount / len(months)
+        per_month = inv.amount / len(all_months)
+        months = _months_in_service_period(inv, cutoff_yyyymm=cutoff_yyyymm)
         entity_id = customer_entity.get(inv.customer_id, "US")
         for period in months:
             by_pes[(period, entity_id, inv.segment)] += per_month
@@ -723,9 +735,14 @@ def build_gl(
 ) -> GLArtifacts:
     builder = GLBuilder(coa)
 
+    # Clip revenue recognition at the last FY boundary.
+    # Contracts extending beyond have their remaining revenue stay as deferred.
+    last_fy_end = cfg.fy_end(max(fiscal_years))
+    cutoff_yyyymm = last_fy_end.year * 100 + last_fy_end.month
+
     _post_opening_balances(builder, entities_list, scale)
     _post_ar_invoices(builder, ar_invoices, customers)
-    _post_revenue_recognition(builder, ar_invoices, customers)
+    _post_revenue_recognition(builder, ar_invoices, customers, cutoff_yyyymm=cutoff_yyyymm)
     _post_ar_receipts(builder, ar_invoices, ar_receipts, customers)
     _post_ap_invoices(builder, ap_invoices, cost_centers)
     _post_ap_payments(builder, ap_invoices, ap_payments, cost_centers)
