@@ -1,7 +1,7 @@
 # ACME Finance — Level 300 Architecture
 
 **Status:** Phases 0–10 Complete | Authentication Deferred  
-**Last Updated:** 2026-05-14  
+**Last Updated:** 2026-05-18  
 **AWS Account:** 010928194453 | **Region:** us-east-1
 
 This is the canonical architecture reference for ACME Finance — an end-to-end AI-driven finance analytics platform built on AWS. It covers every deployed component, data flow, security boundary, and deployment mechanism.
@@ -209,52 +209,81 @@ COGNITO_USER_POOL_ID="", COGNITO_CLIENT_ID=""
 
 **Agent instruction includes tool selection guide** — the agent chooses which action group to invoke based on the user's question type (ad-hoc data → SQL, projections → forecast, anomalies → scan, etc.).
 
-#### Forecasting Engine (Linear Trend + Seasonality)
+#### Forecasting Engine (Driver-Based ARR Cohort Model)
 
-The `ForecastMetrics` action group and the FastAPI `/metrics/forecast` endpoint share the same algorithm — a zero-dependency linear trend decomposition with multiplicative seasonal adjustment.
+The `ForecastMetrics` action group uses a driver-based SaaS ARR cohort model that forecasts revenue from underlying business drivers (churn, expansion, new logo bookings) rather than naive trend extrapolation. The FastAPI `/metrics/forecast` endpoint mirrors the same logic.
 
-**Supported metrics:** `revenue` (from `fct_revenue`), `expense` (from `fct_expense`), `operating_income` (from `mart_pl`)
+**Supported metrics:** `revenue` (primary — driver-based ARR), `expense` (from OpEx ratios), `operating_income` (from `mart_pl`)
 
-**Algorithm (4 steps):**
+**Algorithm — ARR Bridge (per tier, per month):**
 
 ```
-1. QUERY historical monthly actuals from Redshift
-   → Returns time series: [(period_yyyymm, amount), ...]
+1. QUERY trailing 4 quarters of fct_arr → compute tier-specific rates:
+   → monthly_churn_rate, monthly_contraction_rate, monthly_expansion_rate
+   → by segment_tier: enterprise, commercial, smb
 
-2. FIT linear trend via ordinary least squares (OLS)
-   → slope = Σ(xᵢ - x̄)(yᵢ - ȳ) / Σ(xᵢ - x̄)²
-   → intercept = ȳ - slope × x̄
-   → trend(t) = intercept + slope × t
+2. QUERY new logo run-rate + weighted pipeline ACV
+   → Blend: pipeline ACV for months 1-3 (near-term visibility)
+   → Run-rate (historical average) for months 4-12
+   → Cap at 25% annual new-logo growth (prevents unrealistic projections)
 
-3. COMPUTE multiplicative seasonal factors (12-month cycle)
-   → For each month m: factor(m) = avg(actual / trend) across all years
-   → If Q1 historically runs 5% above trend → factor = 1.05
+3. QUERY trailing 4 quarters of mart_pl → OpEx ratios:
+   → COGS%, S&M%, R&D%, G&A% of revenue
 
-4. PROJECT forward N periods (default: 4 for agent, 6 for API)
-   → projected(t) = trend(t) × seasonal_factor(month(t))
-   → 95% confidence band: projected ± 1.96 × residual_std_dev
+4. ROLL FORWARD 12 months per tier:
+   → Starting_ARR = prior Ending_ARR
+   → Churn = -(Starting_ARR × monthly_churn)
+   → Contraction = -(Starting_ARR × monthly_contraction)
+   → Expansion = Starting_ARR × monthly_expansion
+   → New Logo = blended monthly ACV
+   → Ending_ARR = Starting + Churn + Contraction + Expansion + New
+
+5. PROJECT revenue and P&L:
+   → Monthly Revenue = (Total Ending_ARR / 12) × (1 + nonsub_uplift)
+   → Expenses = Revenue × trailing OpEx ratios
+   → Operating Income = Gross Profit - Total OpEx
+   → 95% confidence band: ±1.96 × historical CoV
 ```
 
-**Output structure (per projected period):**
+**Three tiers with independent dynamics:**
+
+| Metric | Enterprise | Commercial | SMB |
+|--------|-----------|-----------|-----|
+| Net Revenue Retention | 107% | 89% | 49% |
+| Gross Revenue Retention | 96% | 79% | 45% |
+| Annual Churn Rate | ~0% | 17% | 49% |
+| Annual Expansion | 11% | 9% | 4% |
+
+**Scenario overrides (what-if on growth levers):**
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `churn_pct_multiplier` | 1.0 | 0.5 = halve churn → +4.5% revenue at month 12 |
+| `contraction_pct_multiplier` | 1.0 | Adjust downsell rates |
+| `expansion_pct_multiplier` | 1.0 | Adjust upsell/cross-sell rates |
+| `new_logo_pct_change` | 0.0 | +50 = 50% more bookings → +23.5% revenue |
+
+**Output structure (backward-compatible + new driver detail):**
 
 | Field | Description |
 |-------|-------------|
-| `projected_amount` | trend × seasonal factor |
-| `trend_component` | linear trend value only |
-| `seasonal_factor` | multiplicative adjustment (1.0 = no seasonality) |
-| `confidence_low` | projected − 1.96 × σ |
-| `confidence_high` | projected + 1.96 × σ |
-
-**Summary stats returned:** last 4-period average, projected 4-period average, growth vs. recent (%).
+| `projections[]` | Monthly projected revenue, expenses, operating income |
+| `history[]` | Trailing 24 months of actuals |
+| `confidence_low/high` | ±1.96σ band from historical coefficient of variation |
+| `growth_vs_recent` | Projected vs. last 4-period average (%) |
+| `drivers.rates_by_tier` | Churn/expansion/contraction rates per tier |
+| `drivers.new_logo_monthly_arr` | Blended new logo ACV per month |
+| `drivers.opex_ratios` | COGS%, S&M%, R&D%, G&A% |
+| `arr_bridge[]` | Per-month ARR bridge detail by tier |
 
 **Two invocation paths:**
 
 | Path | Parameters | Default periods |
 |------|-----------|-----------------|
-| Bedrock Agent → `forecast` Lambda | `entity_id?`, `periods_ahead?` | 4 |
+| Bedrock Agent → `forecast` Lambda | `entity_id?`, `periods_ahead?`, `scenario_overrides?` | 12 |
 | React SPA → `/metrics/forecast` API | `metric`, `entity_id?`, `periods_ahead?` | 6 |
 
-Both paths query the same Redshift tables and run identical math. The Lambda version is invoked by the Bedrock Agent for natural-language questions ("forecast revenue for next 4 quarters"). The API version powers the React `/forecast` page with interactive charts (Recharts).
+Both paths query the same Redshift tables and run the same driver-based model. The Lambda version is invoked by the Bedrock Agent for natural-language questions ("forecast revenue for next 12 months" or "forecast revenue if churn doubles"). The API version powers the React `/forecast` page with interactive charts (Recharts).
 
 ---
 
@@ -479,38 +508,387 @@ Staging (stg_*)           Intermediate (int_*)        Marts (mart_*, fct_*, dim_
 
 ---
 
-### 5. Data Ingestion Pipeline
+### 5. End-to-End Data Journey
+
+This section walks through the complete data lifecycle — from source systems through ingestion, transformation, and consumption — at progressively deeper detail levels.
+
+#### High-Level Data Flow (Level 200)
 
 ```
-EventBridge (06:00 UTC daily, currently disabled)
-  └─► Step Functions state machine
-       ├─► Parallel: 3 Glue ETL jobs
-       │    ├─ ETL_ERP: RDS → S3 raw → Glue → S3 curated (Iceberg)
-       │    ├─ ETL_EPM: S3 EPM drops → curated
-       │    └─ ETL_CRM: S3 CRM drops → curated
-       └─► Sequential: Curated Crawler → Glue Catalog update
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          SOURCE SYSTEMS                                     │
+│                                                                             │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐                     │
+│  │  ERP System   │   │  CRM System   │   │  EPM System   │                   │
+│  │  (NetSuite /  │   │  (Salesforce)  │   │  (Anaplan /   │                   │
+│  │   SAP-like)   │   │               │   │   Adaptive)   │                   │
+│  │              │   │  Accounts     │   │              │                     │
+│  │  GL Journals │   │  Opportunities │   │  Budgets     │                   │
+│  │  AR/AP       │   │  ARR Movements │   │  Forecasts   │                   │
+│  │  Customers   │   │  Pipeline     │   │  Headcount   │                     │
+│  │  Fixed Assets│   │  Contacts     │   │  Drivers     │                     │
+│  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘                     │
+│         │                  │                  │                              │
+└─────────┼──────────────────┼──────────────────┼─────────────────────────────┘
+          │                  │                  │
+          ▼                  ▼                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      DATA LAKE (S3 — Medallion Architecture)                │
+│                                                                             │
+│  ┌── RAW ZONE (Bronze) ──────────────────────────────────────────────┐      │
+│  │  s3://acme-lake-dev-raw-010928194453/                             │      │
+│  │    erp/ → Parquet (GL journals, AR/AP invoices, customers, ...)   │      │
+│  │    crm/ → Parquet (accounts, opps, arr_movement partitioned)     │      │
+│  │    epm/ → Parquet (plan_lines, budgets, headcount)               │      │
+│  └────────────────────────────────┬──────────────────────────────────┘      │
+│                                   │ Glue ETL (PySpark + Iceberg)            │
+│                                   ▼                                         │
+│  ┌── CURATED ZONE (Silver) ──────────────────────────────────────────┐      │
+│  │  s3://acme-lake-dev-curated-010928194453/iceberg/                 │      │
+│  │    Iceberg tables with ACID guarantees + schema evolution         │      │
+│  │    + audit columns (_ingest_date, _ingest_run_id)                 │      │
+│  └────────────────────────────────┬──────────────────────────────────┘      │
+│                                   │ Redshift Spectrum (external schema)      │
+└───────────────────────────────────┼─────────────────────────────────────────┘
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                  DATA WAREHOUSE (Redshift Serverless + dbt)                  │
+│                                                                             │
+│  ┌── STAGING ──────┐  ┌── INTERMEDIATE ─────┐  ┌── MARTS ──────────────┐   │
+│  │  stg_erp__*     │  │  int_gl_entries_    │  │  mart_pl (P&L)       │   │
+│  │  stg_crm__*     │─►│    enriched         │─►│  fct_arr (ARR)       │   │
+│  │  stg_epm__*     │  │  int_revenue_monthly│  │  fct_revenue         │   │
+│  │                 │  │  int_expense_monthly │  │  fct_expense         │   │
+│  │  (schema       │  │                     │  │  fct_gl_entries      │   │
+│  │   conform)     │  │  (business logic    │  │  mart_ar_aging       │   │
+│  │                 │  │   & joins)          │  │  dim_* (6 tables)    │   │
+│  └─────────────────┘  └─────────────────────┘  └──────────┬───────────┘   │
+│                                                            │               │
+└────────────────────────────────────────────────────────────┼───────────────┘
+                                                             │
+                                                             ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      CONSUMPTION LAYER                                      │
+│                                                                             │
+│  ┌───────────────────┐  ┌──────────────────────┐  ┌────────────────────┐   │
+│  │  React Dashboard  │  │   Bedrock AI Agent   │  │  Forecast Lambda   │   │
+│  │  (CloudFront)     │  │   (6 Action Groups)  │  │  (Driver-based     │   │
+│  │                   │  │                      │  │   ARR cohort)      │   │
+│  │  P&L / ARR /     │  │  NL → SQL → Answer  │  │                    │   │
+│  │  AR Aging /       │  │  Variance RCA       │  │  Scenarios:        │   │
+│  │  Forecast /       │  │  What-If Sim        │  │  - Churn ↑↓        │   │
+│  │  Anomalies        │  │  Anomaly Detection  │  │  - Bookings ↑↓     │   │
+│  └───────────────────┘  └──────────────────────┘  │  - Expansion ↑↓    │   │
+│                                                    └────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Component | Service | Purpose |
-|-----------|---------|---------|
-| Replication | DMS Serverless | RDS Postgres → S3 raw zone (Parquet) |
-| Catalog | Glue Data Catalog | Schema discovery and metadata |
-| ETL | Glue Spark | Raw → Curated (Iceberg, dedup, audit columns) |
-| Table format | Apache Iceberg | ACID, schema evolution, time travel |
-| Data lake | S3 (raw + curated) | Medallion architecture (bronze/silver/gold) |
-| Orchestration | Step Functions + EventBridge | Daily refresh pipeline |
+#### Source Systems Detail (Level 300)
+
+| System | Simulated As | Tables | Records | Key Fields |
+|--------|-------------|--------|---------|------------|
+| **ERP** | Python generators → Parquet | `gl_journal_header`, `gl_journal_line`, `ar_invoice`, `ar_receipt`, `ap_invoice`, `ap_payment`, `customer`, `vendor`, `entity`, `chart_of_accounts`, `cost_center`, `fixed_asset`, `fa_depreciation` | ~800K rows | Salesforce-style fiscal calendar (FY ends Jan 31) |
+| **CRM** | Python generators → Parquet | `account`, `contact`, `opportunity`, `opportunity_line`, `arr_movement` (partitioned), `pipeline_snapshot` (partitioned) | ~10K rows | UUIDs shared with ERP customer table |
+| **EPM** | Python generators → Parquet | `budget_version`, `forecast_version`, `plan_line` (partitioned), `headcount_plan`, `driver_assumption` | ~6K rows | Account-level budget vs. forecast |
+
+**Synthetic data characteristics:**
+- 3 fiscal years (FY23–FY25): $1.6B → $2.0B → $2.3B revenue
+- 800 customers (quick mode at 10% scale), 3 entities (US, EMEA, APAC)
+- Ratable revenue recognition across service periods with fiscal year cutoff
+- CRM `account_id` = ERP `customer_id` (same UUIDs for reconciliation)
+
+**Data Generation Pipeline (Phase 2):**
+
+```
+Phase 2A: Reference Data
+  └─ entities, chart_of_accounts, cost_centers
+
+Phase 2B: CRM
+  └─ accounts → contacts → opportunities → opp_lines → arr_movements → pipeline_snapshots
+
+Phase 2C: AR / AP / Payroll / Fixed Assets
+  └─ CRM accounts flow into AR customers (same UUIDs)
+  └─ AP vendors, invoices, payments
+  └─ Payroll as semi-monthly AP
+  └─ Fixed assets + depreciation schedules
+
+Phase 2D: GL Auto-Posting
+  └─ Revenue recognition (ratable across service periods, capped at fiscal year boundary)
+  └─ AR invoices/receipts → GL journals
+  └─ AP invoices/payments → GL journals
+  └─ Depreciation → GL journals
+  └─ Balance assertions: every journal balances (debits = credits)
+
+Phase 2E: EPM + Anomalies + Upload
+  └─ Budget/forecast versions with plan lines
+  └─ Seeded anomalies (aged AR, S&M overspend, asset disposal, stalled pipeline)
+  └─ Upload to S3 raw zone
+```
+
+#### Data Ingestion & ETL (Level 400)
+
+**Step 1: S3 Raw Zone Upload**
+
+The generator pipeline writes files in the layout expected by Glue crawlers:
+
+```
+s3://acme-lake-dev-raw-010928194453/
+├── erp/
+│   ├── gl_journal_header/
+│   │   ├── gl_journal_header.csv          ← Postgres COPY compatible
+│   │   └── part-0.parquet                 ← Glue catalog reads this
+│   ├── gl_journal_line/
+│   │   └── part-0.parquet
+│   ├── customer/
+│   │   └── part-0.parquet
+│   └── ... (13 tables)
+├── crm/
+│   ├── account/
+│   │   └── part-0.parquet
+│   ├── arr_movement/
+│   │   ├── period_yyyymm=202302/part-0.parquet   ← Hive-style partitioning
+│   │   ├── period_yyyymm=202303/part-0.parquet
+│   │   └── ...
+│   └── ... (6 tables)
+└── epm/
+    ├── plan_line/
+    │   ├── period_yyyymm=202302/part-0.parquet
+    │   └── ...
+    └── ... (5 tables)
+```
+
+**Step 2: Glue Crawlers → Catalog Discovery**
+
+4 crawlers (on-demand, triggered by Step Functions):
+
+| Crawler | Source Path | Target Database | Behaviour |
+|---------|-----------|-----------------|-----------|
+| `crawler-erp` | `s3://.../erp/` | `acme_finance_raw_erp_dev` | Discover Parquet schemas, 2-level table detection |
+| `crawler-crm` | `s3://.../crm/` | `acme_finance_raw_crm_dev` | Detect Hive partitions (period_yyyymm) |
+| `crawler-epm` | `s3://.../epm/` | `acme_finance_raw_epm_dev` | Detect Hive partitions |
+| `crawler-curated` | `s3://.../iceberg/` | `acme_finance_curated_dev` | Detect Iceberg tables via metadata.json |
+
+**Step 3: Glue ETL Job — Raw → Curated (Iceberg)**
+
+**Script:** `pipelines/glue_jobs/raw_to_curated.py`
+
+```python
+# Core ETL loop (per table):
+for table_name in source_tables:
+    # 1. Read via Glue DynamicFrame (handles partitions + schema)
+    dyf = glueContext.create_dynamic_frame.from_catalog(
+        database=source_database, table_name=table_name)
+    df = dyf.toDF()
+
+    # 2. Add audit columns
+    df = df.withColumn("_ingest_date", current_date())
+           .withColumn("_ingest_run_id", lit(run_id))
+
+    # 3. Write as Iceberg (ACID upsert via createOrReplace)
+    df.writeTo(f"glue_iceberg.{target_database}.{table_name}")
+      .using("iceberg")
+      .tableProperty("format-version", "2")
+      .tableProperty("write.format.default", "parquet")
+      .createOrReplace()
+```
+
+**Key architectural decisions:**
+
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Table format | Apache Iceberg v2 | ACID guarantees, schema evolution, time travel, Redshift Spectrum compatible |
+| Write mode | `createOrReplace()` | Full refresh — simpler than CDC for lab workload. Iceberg handles metadata atomically |
+| Catalog | Glue Data Catalog via `glue_iceberg` Spark catalog | Single metadata store for Glue ETL + Redshift Spectrum + crawlers |
+| Workers | G.1X × 2 (4 vCPU, 16GB total) | Sufficient for ~22MB raw data; auto-scales if data grows |
+| Spark config | `spark.sql.catalog.glue_iceberg.io-impl=S3FileIO` | Native S3 file I/O for Iceberg |
+
+**Step 4: Step Functions Orchestration**
+
+```
+                    ┌──────────────────────────┐
+                    │  EventBridge Rule         │
+                    │  06:00 UTC daily          │
+                    │  (currently disabled)     │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  Step Functions           │
+                    │  acme-finance-dev-refresh │
+                    └────────────┬─────────────┘
+                                 │
+              ┌──────────────────┼──────────────────┐
+              │                  │                  │
+    ┌─────────▼──────┐  ┌───────▼────────┐  ┌──────▼─────────┐
+    │  Glue ETL      │  │  Glue ETL      │  │  Glue ETL      │
+    │  --source_db:  │  │  --source_db:  │  │  --source_db:  │
+    │  raw_erp       │  │  raw_crm       │  │  raw_epm       │
+    │  (13 tables)   │  │  (6 tables)    │  │  (5 tables)    │
+    └────────┬───────┘  └───────┬────────┘  └──────┬─────────┘
+              │                  │                  │
+              └──────────────────┼──────────────────┘
+                                 │  All 3 succeed (parallel)
+                    ┌────────────▼─────────────┐
+                    │  Glue Crawler             │
+                    │  (curated — detects new   │
+                    │   Iceberg table versions) │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  dbt run                  │
+                    │  (23 models, 41 tests)    │
+                    │  staging → intermediate   │
+                    │  → marts                  │
+                    └──────────────────────────┘
+```
+
+**Step 5: dbt Transformation — Redshift Serverless**
+
+**Connection:** Redshift Spectrum external schema `acme_finance_curated_dev` reads Iceberg tables directly from S3 via Glue Catalog. No data copying — Spectrum pushes predicates to S3.
+
+**Layer 1 — Staging (`analytics_dev_staging`)**
+
+Purpose: 1:1 schema-conform views of curated tables. Rename columns, cast types, apply conventions.
+
+```sql
+-- Example: stg_crm__arr_movement.sql
+SELECT
+    arr_movement_id,
+    account_id AS customer_id,    ← rename for downstream joins
+    segment    AS product_segment,
+    movement_type,
+    arr_change,
+    starting_arr,
+    ending_arr,
+    period_yyyymm
+FROM {{ source('curated_crm', 'arr_movement') }}
+```
+
+**Layer 2 — Intermediate (`analytics_dev_intermediate`)**
+
+Purpose: Business logic joins, enrichment, and aggregation.
+
+```
+int_gl_entries_enriched        ← GL lines + COA + cost center + entity
+  │                              Adds: account_type, pnl_rollup, is_revenue,
+  │                              is_expense, entity mapping
+  │
+  ├─► int_revenue_monthly      ← SUM(net_amount) WHERE is_revenue
+  │                              GROUP BY entity, account_segment, period
+  │
+  └─► int_expense_monthly      ← SUM(net_amount) WHERE is_expense
+                                 GROUP BY entity, pnl_rollup, period
+```
+
+**Layer 3 — Marts (`analytics_dev_marts`)**
+
+Purpose: Consumption-ready facts and dimensions for dashboards and AI agent.
+
+| Table | Grain | Key Columns | Powers |
+|-------|-------|-------------|--------|
+| `mart_pl` | entity × fiscal_year × quarter × period | total_revenue, cogs, gross_profit, sales_marketing, research_dev, general_admin, total_opex, operating_income | P&L dashboard, forecast baseline |
+| `fct_arr` | customer × period × movement_type | starting_arr, arr_change, ending_arr, segment_tier, region | ARR waterfall, forecast driver rates |
+| `fct_gl_entries` | journal_line (atomic) | debit_amount, credit_amount, net_amount, account_type, pnl_rollup | Variance RCA, anomaly detection |
+| `fct_revenue` | entity × segment × period | revenue_amount | Revenue trend charts |
+| `fct_expense` | entity × cost_center × pnl_rollup × period | expense_amount | Expense analysis |
+| `mart_ar_aging` | invoice (open) | amount_due, days_overdue, aging_bucket | AR aging dashboard, anomaly detector |
+| `dim_customer` | customer_id | customer_name, segment_tier, region, billing_country | ARR enrichment (LEFT JOIN from fct_arr) |
+| `dim_account` | account_id | account_name, account_type, pnl_rollup | GL enrichment |
+| `dim_entity` | entity_id | entity_name, currency | Filtering |
+| `dim_cost_center` | cost_center_id | cc_name, cc_function, entity_id | Expense drill-down |
+| `dim_date` | date_day | fiscal_year, fiscal_quarter, period_yyyymm | Calendar spine |
+
+**dbt Tests (41 total):**
+- Uniqueness: all primary keys (dim_*, fct_gl_entries)
+- Not-null: all primary keys + critical amounts
+- Accepted values: account_type ∈ {asset, liability, equity, revenue, expense}, entity_id ∈ {US, EMEA, APAC}
+- Custom: `assert_gl_balanced` (debits = credits per journal), `assert_pl_identity` (operating_income = gross_profit - total_opex)
+
+#### Forecasting Engine — Driver-Based ARR Cohort Model (Level 400)
+
+The `ForecastMetrics` action group uses a proper SaaS driver model instead of naive trend extrapolation.
+
+**ARR Bridge Formula (per tier, per month):**
+
+```
+Starting_ARR     = prior month's Ending_ARR
+Churn            = -(Starting_ARR × monthly_churn_rate)
+Contraction      = -(Starting_ARR × monthly_contraction_rate)
+Expansion        = Starting_ARR × monthly_expansion_rate
+New Logo         = blended monthly ACV (pipeline months 1-3, run-rate months 4-12)
+Ending_ARR       = Starting_ARR + Churn + Contraction + Expansion + New Logo
+Monthly Revenue  = (Total Ending_ARR / 12) / (1 - nonsub_ratio)
+```
+
+**Three tiers with independent dynamics:**
+
+| Metric | Enterprise | Commercial | SMB |
+|--------|-----------|-----------|-----|
+| Net Revenue Retention | 107% | 89% | 49% |
+| Gross Revenue Retention | 96% | 79% | 45% |
+| Annual Churn Rate | 0% | 17% | 49% |
+| Annual Expansion | 11% | 9% | 4% |
+
+**Scenario overrides (what-if on growth levers):**
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `churn_pct_multiplier` | 1.0 | 0.5 = halve churn → +4.5% revenue at month 12 |
+| `contraction_pct_multiplier` | 1.0 | Adjust downsell rates |
+| `expansion_pct_multiplier` | 1.0 | Adjust upsell/cross-sell rates |
+| `new_logo_pct_change` | 0.0 | +50 = 50% more new bookings → +23.5% revenue |
+
+**Data flow through the forecast Lambda:**
+
+```
+Query 1: fct_arr (T4Q)              Query 2: fct_arr + opportunity    Query 3: mart_pl (T4Q)
+├─ Churn rates by tier               ├─ New logo monthly run-rate      ├─ OpEx ratios (COGS%, S&M%,
+├─ Contraction rates                 │   by tier                       │   R&D%, G&A%)
+├─ Expansion rates                   └─ Weighted pipeline ACV          └─ Historical monthly revenue
+└─ Ending ARR by tier                                                     (24 months)
+         │                                    │                                    │
+         └────────────────────────────────────┼────────────────────────────────────┘
+                                              │
+                                   ┌──────────▼──────────┐
+                                   │  Roll Forward ARR   │
+                                   │  12 months × 3 tiers│
+                                   │  Apply scenario     │
+                                   │  overrides           │
+                                   └──────────┬──────────┘
+                                              │
+                                   ┌──────────▼──────────┐
+                                   │  P&L Projection     │
+                                   │  Revenue = ARR/12   │
+                                   │  + nonsub uplift    │
+                                   │  Expenses = Rev ×   │
+                                   │  opex ratios        │
+                                   │  OI = GP - OpEx     │
+                                   └──────────┬──────────┘
+                                              │
+                                   ┌──────────▼──────────┐
+                                   │  Confidence Bands   │
+                                   │  ±1.96σ from        │
+                                   │  historical CoV     │
+                                   └─────────────────────┘
+```
 
 ---
 
 ### 6. Source Systems
 
-| System | Service | Data |
-|--------|---------|------|
-| ERP | RDS Postgres (`t3.small`) | GL entries, invoices, subscriptions, payroll, fixed assets (791K rows) |
-| EPM | S3 drops | Budget/plan data (`stg_epm__plan_line`) |
-| CRM | S3 drops | Customer accounts, opportunities, ARR |
+| System | Simulated Service | Tables | Records | Key Data |
+|--------|---------|--------|---------|------|
+| ERP | NetSuite/SAP-like (Python generators) | 13 tables | ~800K rows | GL journals (header + line), AR invoices/receipts, AP invoices/payments, customers, vendors, entities, chart of accounts, cost centers, fixed assets, depreciation |
+| CRM | Salesforce (Python generators) | 6 tables | ~10K rows | Accounts, contacts, opportunities + line items, ARR movements (Hive-partitioned), pipeline snapshots (partitioned) |
+| EPM | Anaplan/Adaptive (Python generators) | 5 tables | ~6K rows | Budget versions, forecast versions, plan lines (partitioned), headcount plan, driver assumptions |
 
-**Synthetic data:** 3 fiscal years (FY23–FY25), FY23 $1.6B → FY24 $2.0B → FY25 $2.3B revenue, 8K customers, Salesforce-shaped.
+**Synthetic data characteristics:**
+- 3 fiscal years (FY23–FY25): $1.6B → $2.0B → $2.3B revenue (realistic SaaS growth trajectory)
+- 800 customers (10% quick-mode scale), 3 entities (US, EMEA, APAC)
+- Salesforce-shaped fiscal calendar (FY ends Jan 31)
+- CRM `account_id` = ERP `customer_id` (shared UUIDs generated in Phase 2B, carried through Phase 2C)
+- Ratable revenue recognition across service periods, capped at fiscal year boundary
+- Every GL journal balances: SUM(debits) = SUM(credits) — enforced at generation time
+- Seeded anomalies: aged AR (>90 days), S&M overspend (2× spike), asset disposal losses, stalled pipeline deals
 
 ---
 
@@ -681,15 +1059,25 @@ Origin Access Control (OAC) with sigv4 signing. S3 bucket policy allows `s3:GetO
 ### Daily ETL Flow
 
 ```
-EventBridge (06:00 UTC) → Step Functions
-  ├─ Parallel:
-  │   ├─ DMS: RDS → S3 raw (full load, Parquet)
-  │   ├─ Glue ETL: S3 raw → S3 curated (Iceberg, dedup)
-  │   └─ (EPM/CRM: S3 drops → curated)
-  └─ Sequential: Glue Crawler → Catalog update
-       └─ Redshift Spectrum can now query latest curated data
-           └─ dbt run → refresh staging → intermediate → marts
+EventBridge (06:00 UTC, configurable) → Step Functions (acme-finance-dev-refresh)
+  │
+  ├─ Parallel (3 branches):
+  │   ├─ Glue ETL: raw_erp → curated (13 tables, Iceberg createOrReplace)
+  │   ├─ Glue ETL: raw_crm → curated (6 tables, Hive-partitioned → Iceberg)
+  │   └─ Glue ETL: raw_epm → curated (5 tables, Hive-partitioned → Iceberg)
+  │
+  ├─ Converge (all 3 succeed):
+  │   └─ Glue Crawler (curated) → detect new Iceberg table versions
+  │
+  └─ Sequential:
+      └─ dbt run (23 models, 41 tests)
+          └─ staging → intermediate → marts
+              └─ Consumption-ready data in analytics_dev_marts
 ```
+
+**Idempotent:** Every branch uses `createOrReplace()` — re-run any step safely. Iceberg handles metadata atomically.
+
+**Glue ETL detail:** PySpark reads via `DynamicFrame.from_catalog()`, adds audit columns (`_ingest_date`, `_ingest_run_id`), writes as Iceberg v2 with Parquet format. See `pipelines/glue_jobs/raw_to_curated.py`.
 
 ---
 
@@ -744,6 +1132,48 @@ infra/envs/dev/main.tf
 
 ## Key Decisions & Trade-offs
 
+### Redshift Serverless vs Provisioned Cluster
+
+**Chose:** Redshift Serverless (8–32 RPU auto-scaling, auto-pause)  
+**Reason:** Lab/startup workload doesn't justify 24/7 provisioned cluster. Pay per query — auto-pauses when idle, auto-scales under load. No node management, patching, or resizing operations.  
+**Trade-off:** Cold start after idle pause (~15–30s). Less control over compute/storage decoupling. No reserved instance pricing.
+
+### Apache Iceberg vs Raw Parquet
+
+**Chose:** Apache Iceberg v2 table format for curated zone  
+**Reason:** ACID write guarantees (atomic metadata swap via `createOrReplace()`), schema evolution (add columns without rewriting data), time travel (query historical snapshots), and native Redshift Spectrum compatibility — zero-copy from S3 to Redshift queries.  
+**Trade-off:** Adds metadata overhead (manifest files, snapshot history). Requires Glue Catalog as Iceberg catalog (`glue_iceberg` Spark catalog). More complex than plain Parquet directory reads.
+
+### dbt vs Stored Procedures
+
+**Chose:** dbt (data build tool) for Redshift transformations  
+**Reason:** Version-controlled SQL in Git, built-in testing framework (41 tests on every run), lineage graph, incremental materialization support, and consistent staging → intermediate → marts modeling convention. Tests include custom GL balance assertions and P&L identity checks.  
+**Trade-off:** Requires dbt CLI installation and profiles.yml configuration. No native Redshift scheduling (triggered via Step Functions). Additional learning curve vs. raw SQL.
+
+### Glue ETL vs EMR
+
+**Chose:** AWS Glue ETL (managed PySpark)  
+**Reason:** Serverless — no cluster management. 2 G.1X workers sufficient for ~22MB raw data. Integrated with Glue Data Catalog for both source (raw) and target (Iceberg) tables. Auto-scales if data grows.  
+**Trade-off:** Higher per-DPU cost than EMR. Less control over Spark configuration. Cold start on each job invocation (~1–2 min).
+
+### Bedrock Agent vs Custom RAG Pipeline
+
+**Chose:** Amazon Bedrock Agent with 6 action groups  
+**Reason:** Managed agent orchestration — Bedrock handles tool selection, parameter extraction, and response synthesis. No vector DB to maintain (AgentCore Memory for semantic recall). Claude Sonnet for high-quality financial analysis responses. Each action group is a standalone Lambda with focused logic.  
+**Trade-off:** Less control over prompt engineering within the agent loop. Action group response size limits. Vendor lock-in to Bedrock agent runtime.
+
+### Synthetic Data vs Anonymized Production Data
+
+**Chose:** Python-generated synthetic financial data  
+**Reason:** Full control over data characteristics — 3 fiscal years of realistic SaaS growth ($1.6B → $2.3B), 800 customers across 3 entities, proper GL double-entry balancing, seeded anomalies for testing (aged AR, S&M overspend, asset disposal, stalled pipeline). CRM `account_id` = ERP `customer_id` via shared UUIDs.  
+**Trade-off:** Doesn't capture real-world data quirks (encoding issues, missing fields, schema drift). Anomalies are deterministic, not emergent. Scale limited to 10% mode for fast iteration.
+
+### Driver-Based ARR Forecast vs Linear Trend Extrapolation
+
+**Chose:** Driver-based ARR cohort model with tier-specific rates  
+**Reason:** Captures SaaS-specific dynamics (churn/contraction/expansion/new logo per tier) that linear trend misses. ARR bridge is the standard SaaS finance model — CFOs and investors understand it. Scenario overrides enable natural what-if analysis ("what if churn doubles?"). Rates computed from trailing 4 quarters of actual data.  
+**Trade-off:** Requires more complex data pipeline (3 Redshift queries vs. 1). Assumes trailing rates are predictive. New-logo cap (25% annual) is a hard constraint that may underestimate hypergrowth scenarios.
+
 ### Lambda Function URL vs API Gateway
 
 **Chose:** Lambda Function URL with `RESPONSE_STREAM`  
@@ -774,16 +1204,16 @@ infra/envs/dev/main.tf
 **Reason:** OAuth 2.0 apps in IAM Identity Center are exclusively for Trusted Identity Propagation (token exchange to AWS managed services like Redshift, S3). SAML 2.0 is the correct protocol for federating external apps into Cognito.  
 **Trade-off:** Requires manual SAML app registration in IAM Identity Center console (not automatable via Terraform).
 
-### Lambda OLS Forecasting vs SageMaker
+### Lambda Driver-Based Forecast vs SageMaker
 
-**Chose:** Zero-dependency linear trend + seasonality in Lambda (~60 lines of Python)  
+**Chose:** Driver-based ARR cohort model in Lambda — pure Python, zero ML dependencies  
 **Reason (5 factors):**
 
-1. **Cost** — A SageMaker real-time endpoint (ml.t3.medium) costs ~$50/month minimum, which alone hits the project's entire $50/month budget target. The Lambda forecast runs in <1s per invocation and costs effectively $0 at lab traffic.
-2. **Data volume** — The time series is 36 monthly data points (3 fiscal years). OLS regression on 36 points is trivially fast; ML infrastructure is overkill.
-3. **No training cycle** — OLS is deterministic and computed on every request from current warehouse data. There's no model to train, retrain, version, or deploy — no SageMaker training jobs, model registry, or endpoint management.
-4. **Operational simplicity** — The forecast code runs inside the same Lambda + Redshift Data API pattern as every other tool. Adding SageMaker means a new IAM role, VPC endpoint or NAT Gateway (~$32/month), model artifact bucket, and endpoint auto-scaling configuration.
-5. **Adequate accuracy** — For a finance planning tool showing directional trend + seasonality to a CFO, the linear decomposition method is standard practice (it's what most FP&A teams use in Excel). The 95% confidence band from residual std dev communicates uncertainty honestly.
+1. **Cost** — A SageMaker real-time endpoint (ml.t3.medium) costs ~$50/month minimum, which alone hits the project's entire $50/month budget target. The Lambda forecast runs in <2s per invocation and costs effectively $0 at lab traffic.
+2. **Business interpretability** — The ARR bridge model (churn/expansion/new logo per tier) speaks the language of SaaS finance. CFOs and investors understand tier-specific NRR, GRR, and new logo ACV — they don't need ML feature importance explanations.
+3. **No training cycle** — Rates are computed from trailing 4 quarters on every request. There's no model to train, retrain, version, or deploy — no SageMaker training jobs, model registry, or endpoint management.
+4. **Operational simplicity** — The forecast code runs inside the same Lambda + Redshift Data API pattern as every other action group. Adding SageMaker means a new IAM role, VPC endpoint or NAT Gateway (~$32/month), model artifact bucket, and endpoint auto-scaling configuration.
+5. **Scenario overrides** — The driver-based model enables natural what-if analysis ("what if churn doubles?") by directly adjusting the input rates. ML models don't support this kind of counterfactual reasoning without retraining.
 
 **When SageMaker would be the right call:**
 - Hundreds of SKU-level or customer-level time series requiring hierarchical forecasting (→ SageMaker Canvas or Amazon Forecast)
@@ -791,7 +1221,7 @@ infra/envs/dev/main.tf
 - Production SLA requiring <50ms p99 latency on predictions (→ SageMaker real-time endpoint with model compilation)
 - Model experimentation lifecycle where data scientists need notebooks, experiments, and A/B testing
 
-**Trade-off:** The current approach won't capture non-linear patterns (market shocks, S-curves in adoption). If ACME's growth pattern becomes non-linear, upgrading to Prophet or statsforecast inside the same Lambda is the next step before reaching for SageMaker.
+**Trade-off:** The current model assumes trailing rates are predictive — it won't capture step-function changes (new product launches, market shocks). The 25% annual new-logo cap prevents unrealistic projections but may underestimate hypergrowth. If growth patterns become non-linear, adding Prophet or statsforecast as an ensemble layer inside the same Lambda is the natural next step before reaching for SageMaker.
 
 ### Auth Disabled by Default
 
@@ -891,4 +1321,4 @@ GRANT SELECT ON ALL TABLES IN SCHEMA analytics_dev_marts TO "IAMR:acme-finance-d
 
 ---
 
-**Last Updated:** 2026-05-14
+**Last Updated:** 2026-05-18
